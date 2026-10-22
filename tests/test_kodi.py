@@ -1,6 +1,6 @@
 """Checks for the desktop client's protocol layer. No display, no real host.
 
-`python3 desktop/test_kodi.py` — every assert here encodes a rule that was
+`python3 tests/test_kodi.py` — every assert here encodes a rule that was
 measured against a live Kodi 21.3; a failure means the client would talk to Kodi wrong.
 """
 from __future__ import annotations
@@ -8,10 +8,16 @@ from __future__ import annotations
 import json
 import os
 import stat
+import sys
 import tempfile
 import threading
 import urllib.request
+
 from http.server import BaseHTTPRequestHandler, HTTPServer
+
+# The app lives one level up: this file is run as a script, so Python would put
+# `tests/` on sys.path and never find `kodi`.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import kodi
 from kodi import Addon, Entry, Host, KodiClient, KodiError, artwork_url, strip_kodi_markup

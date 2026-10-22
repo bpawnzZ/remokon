@@ -4,7 +4,7 @@ Needs a display but no host and no network — a fake client answers with genera
 PNGs. Run it headless (the `EGL_PLATFORM=x11` is not optional on this box: GDK's
 EGL probe loads libnvidia-egl-wayland inside X and segfaults):
 
-    EGL_PLATFORM=x11 xvfb-run -a /usr/bin/python3 desktop/test_ui.py
+    EGL_PLATFORM=x11 xvfb-run -a /usr/bin/python3 tests/test_ui.py
 
 Every assert here encodes a bug reported from a real screen, or a rule the
 spec (openspec/specs) states. A failure means the window would misbehave again.
@@ -23,6 +23,10 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 
 from gi.repository import Adw, Gdk, GdkPixbuf, Gio, GLib, Graphene, Gtk  # noqa: E402
+
+# The app lives one level up: this file is run as a script, so Python would put
+# `tests/` on sys.path and never find `kodi`.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import kodi  # noqa: E402
 import ui  # noqa: E402
@@ -1040,8 +1044,8 @@ def test_the_sidebar_collapses_and_gives_its_width_away():
         app.close()
 
 
-def test_z_toggles_the_sidebar_and_h_is_home_only_on_the_remote():
-    """`z` is the sidebar on every page; `h` is home on the Remote and nowhere else."""
+def test_ctrl_b_toggles_the_sidebar_and_z_is_unbound():
+    """`Ctrl+B` is the sidebar; `z` is not bound at all any more."""
     app = App()
     try:
         window = app.open(1100)
@@ -1052,22 +1056,30 @@ def test_z_toggles_the_sidebar_and_h_is_home_only_on_the_remote():
         pump(0.6)
         assert window.sidebar_pane.get_visible(), "the sidebar starts hidden"
 
-        # A playing video must not be touched by the sidebar key.
+        # `z` is nobody's: it must not toggle, send, or touch playback.
         window.player = {"playerid": 7, "fullscreen_video": True}
-        assert press(window, Gdk.KEY_z) is True, "`z` was not handled"
-        assert not window.sidebar_pane.get_visible(), "`z` did not hide the sidebar"
-        assert press(window, Gdk.KEY_z) is True
-        assert window.sidebar_pane.get_visible(), "`z` did not bring the sidebar back"
+        assert press(window, Gdk.KEY_z) is False, "`z` is still handled"
+        assert window.sidebar_pane.get_visible(), "`z` still toggles the sidebar"
         assert sent == [], f"`z` sent something to the box: {sent}"
         assert client.stopped == [], f"`z` touched playback: {client.stopped}"
+
+        # Ctrl+B is the sidebar, and a playing video must not be touched by it.
+        assert press(window, Gdk.KEY_b, Gdk.ModifierType.CONTROL_MASK) is True, \
+            "Ctrl+B was not handled"
+        assert not window.sidebar_pane.get_visible(), "Ctrl+B did not hide the sidebar"
+        assert press(window, Gdk.KEY_b, Gdk.ModifierType.CONTROL_MASK) is True
+        assert window.sidebar_pane.get_visible(), "Ctrl+B did not bring the sidebar back"
+        assert sent == [], f"Ctrl+B sent something to the box: {sent}"
+        assert client.stopped == [], f"Ctrl+B touched playback: {client.stopped}"
 
         # The Remote is no exception: the sidebar is not a page.
         window._show_remote()
         pump(0.2)
         window.player = {"playerid": 7, "fullscreen_video": False}
-        assert press(window, Gdk.KEY_z) is True, "`z` was not handled on the Remote"
-        assert not window.sidebar_pane.get_visible(), "`z` did not hide it on the Remote"
-        assert press(window, Gdk.KEY_z) is True
+        assert press(window, Gdk.KEY_z) is False, "`z` acts on the Remote"
+        assert press(window, Gdk.KEY_b, Gdk.ModifierType.CONTROL_MASK) is True
+        assert not window.sidebar_pane.get_visible(), "Ctrl+B did not hide it on the Remote"
+        assert press(window, Gdk.KEY_b, Gdk.ModifierType.CONTROL_MASK) is True
         assert window.sidebar_pane.get_visible()
 
         # `s` is still the browse surface's stop (the restored test pins it); `x` is
@@ -1145,8 +1157,7 @@ def test_the_key_map_has_no_shadowed_letter():
             "x": "stop",
         }
         # Letters whose effect is not an Input action.
-        special = {"r": "page:remote", "n": "page:now", "v": "view", "z": "sidebar",
-                   "s": "stop"}
+        special = {"r": "page:remote", "n": "page:now", "v": "view", "s": "stop"}
 
         problems = []
         # A live player, complete enough that `n` (Now playing) and `s` both work.

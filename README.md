@@ -121,7 +121,7 @@ live in the same file, so one copy is the whole state.
 | Key | |
 |---|---|
 | `\` | browse ⇄ remote, same window, same place |
-| `z` · `Ctrl+B` | hide / show the sidebar |
+| `Ctrl+B` | hide / show the sidebar |
 | `Space` | play / pause |
 | `x` | stop |
 | `r` · `n` | remote · now playing |

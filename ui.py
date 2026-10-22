@@ -212,7 +212,7 @@ HELP = (
         ("v", "next view: posters, compact, wide, list"),
         ("Ctrl +  Ctrl -", "bigger / smaller tiles"),
         ("c", "menu for the selection (also right-click)"),
-        ("z   Ctrl+B", "hide or show the sidebar"),
+        ("Ctrl+B", "hide or show the sidebar"),
         ("n", "now playing"),
     )),
     ("Remote", (
@@ -601,7 +601,7 @@ class Window(Adw.ApplicationWindow):
             label="Arrows drive the box · Enter OSD/select · Backspace back · Tab fullscreen · "
                   "Esc is sent to the box too · h home · i info · c menu · o player info · "
                   "f fullscreen · x stop · m mute · 1–9 volume · PgUp/PgDn big steps · "
-                  "jkl arrows · z hides the sidebar · left/right seek while a video plays",
+                  "jkl arrows · Ctrl+B hides the sidebar · left/right seek while a video plays",
             css_classes=["dim-label"], wrap=True, justify=Gtk.Justification.CENTER,
             halign=Gtk.Align.CENTER, max_width_chars=64, xalign=0.5))
 
@@ -1753,12 +1753,6 @@ class Window(Adw.ApplicationWindow):
         if name == "question" and not in_text:
             self._show_help()
             return True
-
-        # `z` is the sidebar, on every page: the sidebar sits outside the stack, so a
-        # key that meant one thing here and another there would be a trap. (`s` was
-        # tried first and given back — it stops the film, which is wanted.)
-        if name == "z" and not in_text:
-            return self._toggle_sidebar()
 
         if self.stack.get_visible_child_name() == "remote":
             if name == "Escape":
