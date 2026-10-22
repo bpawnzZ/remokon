@@ -112,7 +112,7 @@ live in the same file, so one copy is the whole state.
 | `↑ ↓ ← →` · `Enter` · `Backspace` | d-pad · select (OSD when fullscreen) · back |
 | `Esc` | back, sent to the box |
 | `h` `i` `c` `o` `f` `m` | home · info · context menu · player info · fullscreen · mute |
-| `1`–`9` · `0` · `+` `-` | set the volume · mute · volume up / down |
+| `1`–`9` · `0` · `=` `-` | set the volume · mute · volume up / down |
 | `PgUp` `PgDn` | big step back / forward |
 | `t` | type into the box's keyboard dialog |
 

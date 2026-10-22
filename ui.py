@@ -121,6 +121,10 @@ BOX_KEYS = {
     "x": "stop",
     "m": "mute",
     "plus": "volumeup",
+    # A bare `=` is `equal` in GDK; `+` needs Shift. Both raise the volume, so the key
+    # under the fingers works without reaching for Shift. Ctrl+= is still zoom — that
+    # branch runs before this lookup and is gated on CONTROL_MASK.
+    "equal": "volumeup", "KP_Equal": "volumeup",
     "minus": "volumedown",
     "Page_Up": "bigstepback",
     "Page_Down": "bigstepforward",
@@ -226,7 +230,7 @@ HELP = (
         ("c", "context menu"),
         ("o", "player process info"),
         ("x   f", "stop \u00b7 fullscreen"),
-        ("m   +  -", "mute \u00b7 volume up / down"),
+        ("m   =  -", "mute \u00b7 volume up / down"),
         ("1\u20139   0", "set the volume \u00b7 mute"),
         ("PgUp  PgDn", "big step back / forward"),
         ("t", "type into the box's keyboard dialog"),
@@ -600,7 +604,7 @@ class Window(Adw.ApplicationWindow):
         outer.append(Gtk.Label(
             label="Arrows drive the box · Enter OSD/select · Backspace back · Tab fullscreen · "
                   "Esc is sent to the box too · h home · i info · c menu · o player info · "
-                  "f fullscreen · x stop · m mute · 1–9 volume · PgUp/PgDn big steps · "
+                  "f fullscreen · x stop · m mute · = / - volume · 1–9 volume · PgUp/PgDn big steps · "
                   "jkl arrows · Ctrl+B hides the sidebar · left/right seek while a video plays",
             css_classes=["dim-label"], wrap=True, justify=Gtk.Justification.CENTER,
             halign=Gtk.Align.CENTER, max_width_chars=64, xalign=0.5))

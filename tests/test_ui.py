@@ -1212,6 +1212,37 @@ def test_the_key_map_has_no_shadowed_letter():
         app.close()
 
 
+def test_equal_raises_the_volume_and_ctrl_equal_still_zooms():
+    """`=` is volume up, `-` is volume down, and Ctrl+= is still zoom.
+
+    `+` needs Shift on a US layout, so the key under the fingers is `equal` in GDK;
+    before this it bound to nothing outside Ctrl, so the volume only went one way.
+    """
+    app = App()
+    try:
+        window = app.open(1100)
+        attach(window)
+        sent: list[str] = []
+        window._send = lambda action: sent.append(action)
+        window._render()
+        pump(0.5)
+
+        assert press(window, Gdk.KEY_equal) is True
+        assert sent == ["volumeup"], sent
+        sent.clear()
+        assert press(window, Gdk.KEY_minus) is True
+        assert sent == ["volumedown"], sent
+
+        # Ctrl+= is zoom: it changes the tiles and never reaches the box.
+        sent.clear()
+        zoom_before = window.zoom
+        assert press(window, Gdk.KEY_equal, Gdk.ModifierType.CONTROL_MASK) is True
+        assert window.zoom != zoom_before, "Ctrl+= stopped zooming"
+        assert sent == [], f"Ctrl+= sent to the box: {sent}"
+    finally:
+        app.close()
+
+
 def test_a_fresh_install_starts_on_the_settings_page():
     """Nothing is built in: no config means the host form, with an empty address."""
     app = App()
