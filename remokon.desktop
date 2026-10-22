@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Remokon
+GenericName=Kodi Remote
+Comment=Browse Kodi add-ons and drive playback from the keyboard
+Exec=remokon
+Icon=remokon
+Terminal=false
+Categories=AudioVideo;Player;
+Keywords=Kodi;remote;media;HTPC;
+StartupNotify=true
