@@ -211,7 +211,7 @@ HELP = (
         ("Backspace", "back — the level you came from, where you left it"),
         ("Shift+Backspace", "forward again"),
         ("/", "filter this list (Esc clears)"),
-        ("Tab", "jump between the sidebar and the grid"),
+        ("Tab", "sidebar ↔ grid (also ← at the left edge, → back)"),
         ("s", "stop the playing video"),
         (",  .", "seek back / forward while a video plays"),
         ("v", "next view: posters, compact, wide, list"),
@@ -1921,6 +1921,14 @@ class Window(Adw.ApplicationWindow):
                 and self._back():
             return True
         if self.stack.get_visible_child_name() == "grid" and not in_text:
+            # A focused sidebar row is not the grid's selection: Return belongs to the
+            # ListBox (its `row-activated` opens the add-on or Favourites), and the app's
+            # item menu has no meaning for a sidebar row — but `c`/Menu must still be
+            # consumed, or `BOX_KEYS` sends the box a context menu instead.
+            if self._in_sidebar() and name in ("Return", "KP_Enter"):
+                return False
+            if self._in_sidebar() and name in ("Menu", "c"):
+                return True
             # Stop from the browse surface. `_stop()` is the Now-playing button's own
             # call (Player.Stop, which closes the video) and is gated on a live player,
             # so there is nothing to check here. The Remote page keeps `x` for stop —
@@ -1946,23 +1954,40 @@ class Window(Adw.ApplicationWindow):
         if not in_text and self.stack.get_visible_child_name() == "grid" \
                 and isinstance(focus, (Gtk.FlowBoxChild, Gtk.FlowBox, Gtk.ListBoxRow, Gtk.ListBox)) \
                 and name in ("Up", "Down", "Left", "Right", "Home", "End"):
+            # A sidebar row is a ListBoxRow too, so this branch used to catch the sidebar
+            # as well and pull the focus back into the grid on the first arrow press —
+            # a sidebar you could Tab into and never steer. Inside the sidebar the arrows
+            # belong to the ListBox: hand Up/Down back to GTK, and make Right the way out.
+            if self._in_sidebar():
+                if name == "Right":
+                    self._focus_content()
+                    return True
+                if name in ("Up", "Down"):
+                    return False
+                return True
             if name in ("Home", "End"):
                 return self._select_index(0 if name == "Home" else -1)
             # The CONTAINER moves the focus: GtkFlowBox and GtkListBox know their own
             # geometry, including the short last row. Calling child_focus() on the
             # focused child only looks *inside* that child, so nothing ever moved.
             direction = DIRECTIONS[name]
+            before = self._selected_index()
             if self.mode == "rows":
                 if self.rows.child_focus(direction):
                     current = self.rows.get_focus_child()
                     if current is not None:
                         self._mark_row(current.get_index())
+                else:
+                    self._hand_off_left(name)
                 return True
             if self.flow.child_focus(direction):
                 child = self.flow.get_focus_child()
                 if isinstance(child, Gtk.FlowBoxChild):
                     self.flow.select_child(child)
                     child.grab_focus()
+            if name == "Left" and self._selected_index() == before:
+                # The left edge of the line: the sidebar is the next thing that way.
+                self._hand_off_left(name)
             return True
         # Ctrl+= is how people actually type "zoom in": GDK reports the key as
         # `equal` unless Shift is down.
@@ -2039,6 +2064,20 @@ class Window(Adw.ApplicationWindow):
             widget = widget.get_parent()
         return False
 
+    def _focus_sidebar(self) -> bool:
+        """Keyboard focus into the sidebar: the current row, else the first (Favourites)."""
+        row = self.sidebar.get_selected_row() or self.sidebar.get_row_at_index(0)
+        if row is None:
+            return False
+        row.grab_focus()
+        return True
+
+    def _hand_off_left(self, name: str) -> bool:
+        """`Left` that had nowhere to go in the grid lands on the sidebar."""
+        if name != "Left" or not self.sidebar_pane.get_visible():
+            return False
+        return self._focus_sidebar()
+
     def _cycle_pane(self) -> bool:
         """Tab moves between the sidebar and the grid, not through seven tiles."""
         if not self.sidebar_pane.get_visible():
@@ -2048,11 +2087,7 @@ class Window(Adw.ApplicationWindow):
         if self._in_sidebar():
             self._focus_content()
             return True
-        row = self.sidebar.get_selected_row() or self.sidebar.get_row_at_index(0)
-        if row is None:
-            return False
-        row.grab_focus()
-        return True
+        return self._focus_sidebar()
 
     def _mark_row(self, index: int):
         """One visible 'current' row, painted by us — the ListBox keeps no selection."""

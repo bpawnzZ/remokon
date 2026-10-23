@@ -599,6 +599,71 @@ def test_c_opens_the_item_menu_without_touching_the_box():
         app.close()
 
 
+def test_keyboard_crosses_from_the_grid_to_the_sidebar():
+    """Left at the left edge reaches the add-ons/Favourites; Right comes back."""
+    app = App()
+    try:
+        window = app.open(1100)
+        client = attach(window)
+        # The sidebar needs rows to be worth crossing to: Favourites plus a few add-ons.
+        window.addons = [kodi.Addon({"addonid": f"plugin.video.f{i}",
+                                     "type": "xbmc.python.pluginsource",
+                                     "name": f"Addon {i}", "enabled": True})
+                         for i in range(3)]
+        window._fill_sidebar()
+        window.mode = "poster"
+        window._render()
+        pump(0.5)
+        assert window.sidebar_pane.get_visible() is True, "the sidebar is not showing, so this proves nothing"
+        window._select_index(0)
+        pump(0.2)
+
+        # Left at the left edge lands on the sidebar, and the grid keeps its place.
+        assert press(window, Gdk.KEY_Left) is True
+        assert window._in_sidebar() is True, "Left at the left edge did not reach the sidebar"
+        assert window._selected_index() == 0, "the crossing moved the grid's selection"
+
+        # Inside the sidebar the arrows belong to the ListBox — the app must not eat them
+        # and must not pull the focus back into the grid (that was the bug).
+        assert press(window, Gdk.KEY_Down) is False, "the grid arrow branch stole Down"
+        assert window._in_sidebar() is True, "Down yanked the focus back into the grid"
+        before = window.sidebar.get_focus_child()
+        window.sidebar.child_focus(Gtk.DirectionType.DOWN)
+        pump(0.1)
+        assert window.sidebar.get_focus_child() is not before, "the sidebar cannot walk its own rows"
+        assert window._in_sidebar() is True
+
+        # Right comes back to the grid, on the tile that was selected.
+        assert press(window, Gdk.KEY_Right) is True
+        assert window._in_sidebar() is False, "Right did not return to the grid"
+        assert window._selected_index() == 0
+
+        # Return in the sidebar is the ListBox's (it activates the row); it must not fall
+        # through to the grid's Return, which would play the selected tile instead.
+        assert press(window, Gdk.KEY_Left) is True
+        assert window._in_sidebar() is True
+        opened_before = list(client.opened)
+        assert press(window, Gdk.KEY_Return) is False, "Return in the sidebar was eaten"
+        assert client.opened == opened_before, "Return in the sidebar played a grid tile"
+        assert press(window, Gdk.KEY_c) is True, "c in the sidebar fell through to the box"
+        assert window._menu is None
+
+        # Both ways still work from the keyboard, and neither reaches the box.
+        assert press(window, Gdk.KEY_Right) is True and window._in_sidebar() is False
+        assert press(window, Gdk.KEY_Tab) is True and window._in_sidebar() is True
+        assert press(window, Gdk.KEY_Tab) is True and window._in_sidebar() is False
+        assert [m for m in client.rpc if m.startswith("Input.")] == [], client.rpc
+
+        # A hidden sidebar takes nothing: the key is handled and the focus stays put.
+        window._toggle_sidebar()
+        pump(0.2)
+        assert window.sidebar_pane.get_visible() is False
+        assert press(window, Gdk.KEY_Left) is True
+        assert window._in_sidebar() is False
+    finally:
+        app.close()
+
+
 # -- back and forward -------------------------------------------------------
 
 def folders(count=30):
