@@ -566,6 +566,39 @@ def test_the_item_menu_offers_favourites_in_one_click():
         app.close()
 
 
+def test_c_opens_the_item_menu_without_touching_the_box():
+    """`c` gives the same menu as a right-click, for the selected entry."""
+    app = App()
+    try:
+        window = app.open(1100)
+        client = attach(window)
+        sent = []
+        window._send = lambda action: sent.append(action)
+        window.mode = "poster"
+        window._render()
+        pump(0.4)
+
+        window._select_index(2)
+        pump(0.1)
+        payload = window.visible_tiles[2].payload
+        assert press(window, Gdk.KEY_c) is True
+        assert window._menu is not None, "c did not open the item menu"
+        assert sent == [], f"c was also sent to the box: {sent}"
+
+        # It is the selection's menu, not some other entry's: the star saves that one.
+        window.menu_favourite.emit("clicked")
+        pump(0.4)
+        assert window._is_saved(payload) is True, "the menu belonged to another entry"
+
+        # The Remote page keeps the box's own c.
+        window._close_menu()
+        window.stack.set_visible_child_name("remote")
+        assert press(window, Gdk.KEY_c) is True
+        assert sent == ["contextmenu"], sent
+    finally:
+        app.close()
+
+
 # -- back and forward -------------------------------------------------------
 
 def folders(count=30):
@@ -1318,12 +1351,13 @@ def test_the_key_map_has_no_shadowed_letter():
 
         # The map as documented. Anything absent must do nothing at all.
         expected = {
-            "c": "contextmenu", "f": "fullscreen", "i": "info",
+            "f": "fullscreen", "i": "info",
             "j": "down", "k": "up", "l": "right", "m": "mute", "o": "codecinfo",
             "x": "stop",
         }
         # Letters whose effect is not an Input action.
-        special = {"r": "page:remote", "n": "page:now", "v": "view", "s": "stop"}
+        special = {"r": "page:remote", "n": "page:now", "v": "view", "s": "stop",
+                   "c": "menu"}
 
         problems = []
         # A live player, complete enough that `n` (Now playing) and `s` both work.
@@ -1334,6 +1368,7 @@ def test_the_key_map_has_no_shadowed_letter():
             # Reset: grid page, sidebar showing, nothing recorded, a live player.
             window.stack.set_visible_child_name("grid")
             window.sidebar_pane.set_visible(True)
+            window._close_menu()
             sent.clear()
             client.stopped.clear()
             pump(0.15)
@@ -1350,6 +1385,8 @@ def test_the_key_map_has_no_shadowed_letter():
                 effect = "stop"
             elif sent:
                 effect = sent[0] if len(sent) == 1 else f"actions:{sent}"
+            elif window._menu is not None:
+                effect = "menu"
             elif window.stack.get_visible_child_name() != page_before:
                 effect = f"page:{window.stack.get_visible_child_name()}"
             elif window.sidebar_pane.get_visible() is False:

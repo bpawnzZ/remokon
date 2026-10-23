@@ -1928,9 +1928,11 @@ class Window(Adw.ApplicationWindow):
             if name in ("s", "S"):
                 self._stop()
                 return True
-            # The menu key (and Shift+F10, which is what keyboards actually have)
-            # opens the same menu as a right-click, on the selected entry.
-            if name == "Menu" or (name == "F10" and state & Gdk.ModifierType.SHIFT_MASK):
+            # The menu key (and Shift+F10, which is what keyboards actually have) opens
+            # the same menu as a right-click, on the selected entry. `c` is here too
+            # because the help overlay has always promised it — and this branch runs
+            # before `BOX_KEYS`, where `c` would send the box its own `contextmenu`.
+            if name in ("Menu", "c") or (name == "F10" and state & Gdk.ModifierType.SHIFT_MASK):
                 self._menu_for_selection()
                 return True
             # Enter opens the folder or plays the item under the selection. Handled
