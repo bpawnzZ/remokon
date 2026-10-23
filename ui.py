@@ -208,7 +208,8 @@ HELP = (
     ("Browsing", (
         ("\u2191 \u2193 \u2190 \u2192", "move the selection"),
         ("Enter", "open the folder, or play the item"),
-        ("Backspace", "up one level"),
+        ("Backspace", "back — the level you came from, where you left it"),
+        ("Shift+Backspace", "forward again"),
         ("/", "filter this list (Esc clears)"),
         ("Tab", "jump between the sidebar and the grid"),
         ("s", "stop the playing video"),
@@ -245,7 +246,7 @@ HELP = (
     )),
     ("Mouse", (
         ("click", "open a folder, or play an item"),
-        ("right-click", "item menu: play, favourite"),
+        ("right-click", "item menu: open/play, ★ Favourites"),
         ("wheel", "scroll the grid or a list"),
     )),
 )
@@ -271,6 +272,12 @@ class Window(Adw.ApplicationWindow):
         self.fav_row: Gtk.ListBoxRow | None = None
         self.fav_detail: Gtk.Label | None = None
         self._menu: Gtk.Popover | None = None
+        # Two stacks, the browser's model: leaving a place pushes where it was onto
+        # `back_stack`; going back pushes the place it left onto `forward_stack`. A new
+        # move clears the forward half, so Forward never lands somewhere never visited.
+        self.back_stack: list[dict] = []
+        self.forward_stack: list[dict] = []
+        self._pending_place: dict | None = None
         self._sidebar_rows: dict[str, Gtk.ListBoxRow] = {}
         # The text box that types into the box's own keyboard dialog, plus the window
         # id it was popped for: one popup per dialog, or cancelling it would raise a
@@ -288,6 +295,7 @@ class Window(Adw.ApplicationWindow):
         self._polling = False
 
         self._build()
+        self._update_nav_buttons()
         GLib.timeout_add(POLL_MS, self._tick)
         if os.environ.get("REMOKON_DEBUG"):
             GLib.timeout_add(3000, self._dump_geometry)
@@ -307,17 +315,22 @@ class Window(Adw.ApplicationWindow):
         self.back_button = Gtk.Button(icon_name="go-previous-symbolic",
                                       tooltip_text="Back (Backspace)")
         self.back_button.connect("clicked", lambda *_: self._back())
-        self.back_button.set_visible(False)
-        header.pack_start(self.back_button)
+        self.forward_button = Gtk.Button(icon_name="go-next-symbolic",
+                                         tooltip_text="Forward (Shift+Backspace)")
+        self.forward_button.connect("clicked", lambda *_: self._forward())
 
-        # Collapsing the sidebar is a view control, so it sits beside Back rather than
-        # next to the page buttons. `sidebar-show-symbolic` is the only sidebar glyph
-        # Adwaita ships — there is no `sidebar-hide-symbolic`, and a mistyped icon
-        # name draws nothing at all while staying clickable.
+        # Collapsing the sidebar is a view control, so it sits first, with the history
+        # pair beside it and before Now playing. `sidebar-show-symbolic` is the only
+        # sidebar glyph Adwaita ships — there is no `sidebar-hide-symbolic`, and a
+        # mistyped icon name draws nothing at all while staying clickable.
         self.sidebar_button = Gtk.Button(icon_name="sidebar-show-symbolic",
                                          tooltip_text="Add-on sidebar (Ctrl+B)")
         self.sidebar_button.connect("clicked", lambda *_: self._toggle_sidebar())
         header.pack_start(self.sidebar_button)
+        # Back and Forward walk the browse history: always visible, insensitive when the
+        # direction has nowhere to go, so the history's state reads without opening it.
+        header.pack_start(self.back_button)
+        header.pack_start(self.forward_button)
 
         self.title = Adw.WindowTitle(title="Remokon", subtitle="Not connected")
         header.set_title_widget(self.title)
@@ -782,6 +795,8 @@ class Window(Adw.ApplicationWindow):
         kodi.save_config(self.host)
         self.addons = addons
         self.favorites = kodi.load_favorites()
+        self.back_stack.clear()
+        self.forward_stack.clear()
         self._fill_sidebar()
         self.showing_favourites = False
         self.entries = []
@@ -900,13 +915,19 @@ class Window(Adw.ApplicationWindow):
         if not tiles:
             self._notice("Nothing here",
                          "This folder is empty." if self.locations else
-                         "No favourites yet — right-click an entry and use "
-                         "Favourites ▸ Add to Favourites." if self.showing_favourites else
+                         "No favourites yet — right-click an entry and choose "
+                         "Favourites." if self.showing_favourites else
                          "No video add-ons matched." if self.search.get_text() else
                          "This host has no video add-ons.")
             return
         self.stack.set_visible_child_name("grid")
-        GLib.idle_add(self._select_first, gen)
+        place, self._pending_place = self._pending_place, None
+        if place is not None:
+            # Back or Forward landed here: its selection and scroll, not the first tile.
+            self._select_index(place["index"] if place["index"] is not None else 0)
+            GLib.idle_add(self._apply_scroll, place["scroll"], gen)
+        else:
+            GLib.idle_add(self._select_first, gen)
 
     def _select_first(self, gen):
         if gen != self._gen:
@@ -960,7 +981,7 @@ class Window(Adw.ApplicationWindow):
         elif not self.locations and self.addons:
             subtitle = f"{subtitle} · {len(self.addons)} video add-ons"
         self.title.set_subtitle(subtitle)
-        self.back_button.set_visible(bool(self.locations) or self.showing_favourites)
+        self._update_nav_buttons()
         self._rebuild_crumbs(levels)
 
     def _rebuild_crumbs(self, levels: list[str]):
@@ -980,6 +1001,7 @@ class Window(Adw.ApplicationWindow):
         """depth 0 is the add-on list; deeper is a folder in the current tree."""
         if depth >= len(self.locations):
             return
+        self._remember()
         self.locations = self.locations[:depth]
         if self.locations:
             self._load_directory()
@@ -1156,6 +1178,7 @@ class Window(Adw.ApplicationWindow):
             self._open_addon(addon)
 
     def _open_addon(self, addon: Addon):
+        self._remember()
         self.showing_favourites = False
         self.locations = [Location(addon.display_name, addon.browse_path)]
         if (row := self._sidebar_rows.get(addon.addonid)) is not None:
@@ -1164,6 +1187,8 @@ class Window(Adw.ApplicationWindow):
 
     def _show_favourites(self):
         """The Favourites destination: saved places, not a folder in the tree."""
+        if not self.showing_favourites:
+            self._remember()
         self.showing_favourites = True
         self.locations = []
         self.entries = []
@@ -1201,12 +1226,14 @@ class Window(Adw.ApplicationWindow):
             if payload["kind"] == "media":
                 self._play_file(payload["path"], payload["title"])
             else:
+                self._remember()
                 self.showing_favourites = False
                 self.locations = [Location(payload["title"], payload["path"])]
                 self._load_directory()
         elif isinstance(payload, Addon):
             self._open_addon(payload)
         elif payload.is_folder:
+            self._remember()
             self.locations.append(Location(payload.heading, payload.file))
             self._load_directory()
         else:
@@ -1271,34 +1298,48 @@ class Window(Adw.ApplicationWindow):
         self.toasts.add_toast(Adw.Toast(title=message, timeout=3))
 
     def _entry_menu(self, payload, anchor: Gtk.Widget, x: float = 0, y: float = 0):
-        """The right-click menu for one entry, with Favourites as a submenu.
+        """The item menu: Open/Play, then one Favourites item with a star.
 
-        One menu builder for the pointer and the keyboard, so `Shift+F10` offers
-        exactly what a right-click offers.
+        A plain popover of buttons — the same shape the header's view menu uses — so a
+        click calls its handler directly. The Favourites row is ONE item, not a submenu:
+        a submenu holding a single row is a second click for nothing, and (worse) the
+        click had to resolve an action name through a nested section to do anything at
+        all. The star is filled when the place is saved and the item toggles.
+
+        One builder for the pointer and the keyboard, so `Shift+F10` offers exactly what
+        a right-click offers.
         """
         kind, path = self._place(payload)
         saved = kodi.is_favorite(self.favorites, kind, path)
         if os.environ.get("REMOKON_DEBUG"):
             print(f"menu for kind={kind} path={path!r} saved={saved} "
                   f"(have {len(self.favorites)})", flush=True)
-        model = Gio.Menu()
-        model.append("Play" if kind == "media" else "Open", "entry.open")
-        favourites = Gio.Menu()
-        favourites.append("Remove from Favourites" if saved else "Add to Favourites",
-                          "entry.favourite")
-        model.append_submenu("Favourites", favourites)
 
         self._close_menu()
-        popover = Gtk.PopoverMenu.new_from_model(model)
-        popover.set_has_arrow(False)
-        actions = Gio.SimpleActionGroup()
-        open_action = Gio.SimpleAction.new("open", None)
-        open_action.connect("activate", lambda *_: self._activate(payload))
-        actions.add_action(open_action)
-        favourite_action = Gio.SimpleAction.new("favourite", None)
-        favourite_action.connect("activate", lambda *_: self._toggle_favourite(payload))
-        actions.add_action(favourite_action)
-        popover.insert_action_group("entry", actions)
+        popover = Gtk.Popover()
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4,
+                      margin_top=8, margin_bottom=8, margin_start=8, margin_end=8)
+        popover.set_child(box)
+
+        def item(icon: str, label: str, tooltip: str, handler) -> Gtk.Button:
+            button = Gtk.Button(css_classes=["flat"])
+            button.set_child(Adw.ButtonContent(icon_name=icon, label=label))
+            button.set_tooltip_text(tooltip)
+            button.connect("clicked", lambda *_a: (popover.popdown(), handler()))
+            box.append(button)
+            return button
+
+        playable = kind == "media"
+        self.menu_open = item(
+            "media-playback-start-symbolic" if playable else "folder-open-symbolic",
+            "Play" if playable else "Open",
+            "Play this item" if playable else "Open this folder",
+            lambda: self._activate(payload))
+        self.menu_favourite = item(
+            "starred-symbolic" if saved else "non-starred-symbolic", "Favourites",
+            "Remove from Favourites" if saved else "Add to Favourites",
+            lambda: self._toggle_favourite(payload))
+
         # Parented to the WINDOW, not to the card: a FlowBoxChild is not a native, and
         # a popover parented to a non-native widget cannot create its surface.
         popover.set_parent(self)
@@ -1359,6 +1400,68 @@ class Window(Adw.ApplicationWindow):
         self._select_index(index if index is not None else 0)
         return False
 
+    # -- place history -----------------------------------------------------
+    #
+    # A browser's model, in two stacks: leaving a place pushes where it was, going back
+    # pushes the place it left the other way. A place is its folder trail (or the
+    # Favourites destination) plus what was selected there and how far it was scrolled —
+    # without those, "back" lands on the right folder at the top, which is not where the
+    # user was.
+
+    def _snapshot(self) -> dict:
+        scroller = self.rows_scroll if self.mode == "rows" else self.cards_scroll
+        return {"locations": list(self.locations),
+                "favourites": self.showing_favourites,
+                "index": self._selected_index(),
+                "scroll": scroller.get_vadjustment().get_value()}
+
+    def _remember(self):
+        """Record the place on screen before moving away from it."""
+        self.back_stack.append(self._snapshot())
+        self.forward_stack.clear()
+        self._update_nav_buttons()
+
+    def _update_nav_buttons(self):
+        if getattr(self, "back_button", None) is None:
+            return
+        self.back_button.set_sensitive(bool(self.back_stack))
+        self.forward_button.set_sensitive(bool(self.forward_stack))
+
+    def _restore(self, place: dict):
+        """Put a recorded place back on screen, selection and scroll included."""
+        self.showing_favourites = place["favourites"]
+        self.locations = list(place["locations"])
+        self._pending_place = place
+        if self.locations:
+            self._load_directory()
+        else:
+            self.entries = []
+            self._render()
+        self._update_nav_buttons()
+
+    def _apply_scroll(self, value: float, gen: int) -> bool:
+        if gen != self._gen:
+            return False
+        scroller = self.rows_scroll if self.mode == "rows" else self.cards_scroll
+        scroller.get_vadjustment().set_value(value)
+        return False
+
+    def _nav_back(self) -> bool:
+        if not self.back_stack:
+            return False
+        place = self.back_stack.pop()
+        self.forward_stack.append(self._snapshot())
+        self._restore(place)
+        return True
+
+    def _forward(self) -> bool:
+        if not self.forward_stack:
+            return False
+        place = self.forward_stack.pop()
+        self.back_stack.append(self._snapshot())
+        self._restore(place)
+        return True
+
     def _back(self) -> bool:
         if os.environ.get("REMOKON_DEBUG"):
             print(f"back pressed: page={self.stack.get_visible_child_name()} "
@@ -1367,6 +1470,10 @@ class Window(Adw.ApplicationWindow):
             return self._leave_remote()
         if self.stack.get_visible_child_name() == "now":
             return self._leave_now()
+        if self.back_stack:
+            return self._nav_back()
+        # Nothing recorded: the older ladder still covers a place reached without a move
+        # (the Favourites destination opened before anything was browsed).
         if self.showing_favourites:
             self.showing_favourites = False
             self._render()
@@ -1800,7 +1907,16 @@ class Window(Adw.ApplicationWindow):
         # turn the key into Kodi's `back`. With nowhere to climb it stays `back`.
         # Only the browse pages: on the Remote page and Now playing, Backspace keeps
         # the meaning those pages give it.
-        if name == "BackSpace" and not in_text and self.stack.get_visible_child_name() \
+        #
+        # Shift+Backspace is the other way. It is consumed on the browse pages even when
+        # there is nothing ahead: letting it fall through would reach `BOX_KEYS`
+        # (`BackSpace` → `back`) and send the box a `back` the user never asked for.
+        if name == "BackSpace" and not in_text and state & Gdk.ModifierType.SHIFT_MASK \
+                and self.stack.get_visible_child_name() in ("grid", "loading", "notice"):
+            self._forward()
+            return True
+        if name == "BackSpace" and not in_text and not state & Gdk.ModifierType.SHIFT_MASK \
+                and self.stack.get_visible_child_name() \
                 in ("grid", "loading", "notice") and (self.locations or self.showing_favourites) \
                 and self._back():
             return True

@@ -90,10 +90,14 @@ class FakeClient:
         self.sent_text: list[str] = []
         self.stopped: list[int] = []
         self.fail_urls = set(fail_urls)
+        # Every JSON-RPC method the window asked for (the 1 Hz tick polls
+        # GUI.GetProperties, so tests filter by prefix rather than compare the whole list).
+        self.rpc: list[str] = []
         # What `GUI.GetProperties` reports as the box's current window; 10000 is Home.
         self.window_id = 10000
 
     def _call(self, method, params=None, timeout=None):
+        self.rpc.append(method)
         if method == "GUI.GetProperties":
             return {"currentwindow": {"id": self.window_id, "label": "Fake"}}
         return "OK"
@@ -507,7 +511,8 @@ def test_empty_favourites_explains_itself():
         app.close()
 
 
-def test_context_menu_has_a_favourites_submenu():
+def test_the_item_menu_offers_favourites_in_one_click():
+    """Favourites is one starred item, not a submenu, and pressing it toggles."""
     app = App()
     try:
         window = app.open(1100)
@@ -515,34 +520,195 @@ def test_context_menu_has_a_favourites_submenu():
         window.mode = "poster"
         window._render()
         pump(0.4)
+        SAVED.clear()
         payload = window.visible_tiles[0].payload
         anchor = window.flow.get_child_at_index(0)
         window._entry_menu(payload, anchor)
         pump(0.2)
         menu = window._menu
         assert menu is not None, "no menu was created"
-        model = menu.get_menu_model()
-        labels, submenu = [], None
-        for index in range(model.get_n_items()):
-            labels.append(model.get_item_attribute_value(index, "label", None).get_string())
-            link = model.get_item_link(index, Gio.MENU_LINK_SUBMENU)
-            if link is not None:
-                submenu = link
-        assert labels[:2] == ["Play", "Favourites"], labels
-        assert submenu is not None, "Favourites is not a submenu"
-        entry_labels = [submenu.get_item_attribute_value(i, "label", None).get_string()
-                        for i in range(submenu.get_n_items())]
-        assert entry_labels == ["Add to Favourites"], entry_labels
 
-        # The submenu's action saves the entry, and the menu is rebuilt as "Remove".
-        menu.activate_action("entry.favourite", None)
-        pump(0.3)
+        buttons = []
+        child = menu.get_child().get_first_child()
+        while child is not None:
+            buttons.append(child)
+            child = child.get_next_sibling()
+        labels = [b.get_child().get_label() for b in buttons]
+        assert labels == ["Play", "Favourites"], labels
+        assert isinstance(menu, Gtk.Popover) and not isinstance(menu, Gtk.PopoverMenu), \
+            "the item menu is still a model menu (actions to resolve, submenus to open)"
+
+        # Unsaved: an outline star offering to save.
+        favourite = buttons[1]
+        assert favourite.get_child().get_icon_name() == "non-starred-symbolic", \
+            favourite.get_child().get_icon_name()
+        assert favourite.get_tooltip_text() == "Add to Favourites", favourite.get_tooltip_text()
+
+        # The press itself — the signal a real click emits — saves the place.
+        favourite.emit("clicked")
+        pump(0.4)
         assert window._is_saved(payload) is True
+        assert SAVED and len(SAVED[-1]) == 1, SAVED
+        assert count_class(window.flow, "fav-badge") == 1, "the saved card carries no mark"
+
+        # Reopened: a filled star that offers to remove, and it removes.
         window._entry_menu(payload, anchor)
         pump(0.2)
-        second = window._menu.get_menu_model().get_item_link(1, Gio.MENU_LINK_SUBMENU)
-        assert second.get_item_attribute_value(0, "label", None).get_string() == \
-            "Remove from Favourites"
+        second = window.menu_favourite
+        assert second.get_child().get_icon_name() == "starred-symbolic", \
+            second.get_child().get_icon_name()
+        assert second.get_tooltip_text() == "Remove from Favourites"
+        second.emit("clicked")
+        pump(0.4)
+        assert window._is_saved(payload) is False
+        assert SAVED[-1] == [], SAVED
+    finally:
+        app.close()
+
+
+# -- back and forward -------------------------------------------------------
+
+def folders(count=30):
+    """Folder entries: `_activate` on one moves deeper instead of playing."""
+    return [kodi.Entry({"label": f"Folder {i}", "file": f"plugin://x/d{i}",
+                        "filetype": "directory", "thumbnail": "", "art": {}})
+            for i in range(count)]
+
+
+def test_back_and_forward_restore_the_place():
+    """Back returns to the folder as it was left: same tile, same scroll."""
+    app = App()
+    try:
+        window = app.open(1100)
+        attach(window, client=FakeClient(folders()))
+        window.mode = "poster"
+        window.locations = [ui.Location("Addons", "plugin://x/")]
+        window._render()
+        pump(0.4)
+
+        adjustment = window.cards_scroll.get_vadjustment()
+        adjustment.set_value(140)
+        window._select_index(4)
+        pump(0.2)
+        scrolled = adjustment.get_value()
+        assert scrolled > 0, "the surface did not scroll, so this test proves nothing"
+
+        window._activate(window.visible_tiles[4].payload)
+        pump(0.6)
+        assert [l.title for l in window.locations] == ["Addons", "Folder 4"], \
+            [l.title for l in window.locations]
+
+        assert window._back() is True
+        pump(0.8)
+        assert [l.title for l in window.locations] == ["Addons"], \
+            [l.title for l in window.locations]
+        assert window._selected_index() == 4, window._selected_index()
+        assert abs(adjustment.get_value() - scrolled) <= 1, \
+            (adjustment.get_value(), scrolled)
+
+        assert window._forward() is True
+        pump(0.8)
+        assert [l.title for l in window.locations] == ["Addons", "Folder 4"], \
+            [l.title for l in window.locations]
+    finally:
+        app.close()
+
+
+def test_a_new_move_drops_the_forward_history():
+    app = App()
+    try:
+        window = app.open(1100)
+        attach(window, client=FakeClient(folders()))
+        window.mode = "poster"
+        window.locations = [ui.Location("Addons", "plugin://x/")]
+        window._render()
+        pump(0.4)
+
+        window._activate(window.visible_tiles[4].payload)
+        pump(0.6)
+        window._back()
+        pump(0.8)
+        assert window.forward_stack, "the back move did not leave a way forward"
+
+        window._activate(window.visible_tiles[7].payload)
+        pump(0.6)
+        assert window.forward_stack == [], "a new move kept the old forward entries"
+        assert window._forward() is False
+    finally:
+        app.close()
+
+
+def test_the_header_offers_back_and_forward_between_pane_and_now_playing():
+    app = App()
+    try:
+        window = app.open(1100)
+        attach(window, client=FakeClient(folders()))
+        window.mode = "poster"
+        window._render()
+        pump(0.4)
+
+        # The header order asked for: the pane toggle, then Back, then Forward, then Now
+        # playing.
+        assert window.sidebar_button.get_next_sibling() is window.back_button, \
+            "Back is not beside the pane toggle"
+        assert window.back_button.get_next_sibling() is window.forward_button, \
+            "Forward is not beside Back"
+        assert window.forward_button.get_next_sibling() is window.now_button, \
+            "Now playing is not after Forward"
+
+        # Nothing moved yet: neither direction can act.
+        assert window.back_button.get_sensitive() is False
+        assert window.forward_button.get_sensitive() is False
+
+        window._activate(window.visible_tiles[2].payload)
+        pump(0.6)
+        assert window.back_button.get_sensitive() is True
+        assert window.forward_button.get_sensitive() is False
+
+        window.back_button.emit("clicked")
+        pump(0.8)
+        assert window.forward_button.get_sensitive() is True, \
+            "Forward stayed dead after Back"
+        assert [l.title for l in window.locations] == ["Folder"], [l.title for l in window.locations]
+    finally:
+        app.close()
+
+
+def test_shift_backspace_goes_forward():
+    app = App()
+    try:
+        window = app.open(1100)
+        client = attach(window, client=FakeClient(folders()))
+        window.mode = "poster"
+        window.locations = [ui.Location("Addons", "plugin://x/")]
+        window._render()
+        pump(0.4)
+
+        window._activate(window.visible_tiles[4].payload)
+        pump(0.6)
+        assert press(window, Gdk.KEY_BackSpace) is True, "Backspace was not handled"
+        pump(0.6)
+        assert [l.title for l in window.locations] == ["Addons"], \
+            [l.title for l in window.locations]
+        assert press(window, Gdk.KEY_BackSpace, Gdk.ModifierType.SHIFT_MASK) is True, \
+            "Shift+Backspace was not handled (forward is dead)"
+        pump(0.6)
+        assert [l.title for l in window.locations] == ["Addons", "Folder 4"], \
+            "Shift+Backspace did not go forward"
+
+        # With nothing ahead it does nothing — and it must never reach the box, where
+        # `BackSpace` means `back`.
+        window._back()
+        pump(0.8)
+        window.forward_stack.clear()
+        window._update_nav_buttons()
+        calls = list(client.rpc)
+        assert press(window, Gdk.KEY_BackSpace, Gdk.ModifierType.SHIFT_MASK) is True, \
+            "Shift+Backspace fell through to the box's own back"
+        sent = [m for m in client.rpc[len(calls):] if m.startswith("Input.")]
+        assert sent == [], sent
+        assert [l.title for l in window.locations] == ["Addons"], \
+            [l.title for l in window.locations]
     finally:
         app.close()
 
