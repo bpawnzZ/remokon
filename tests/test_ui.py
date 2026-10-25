@@ -101,6 +101,8 @@ class FakeClient:
         self.seeks: list[tuple[int, int]] = []
         self.gotos: list[str] = []
         self.volume: int | None = None
+        # Whether the box reports an active player (the queue's "start it?" check).
+        self.playing = False
 
     def _call(self, method, params=None, timeout=None):
         self.rpc.append(method)
@@ -135,6 +137,9 @@ class FakeClient:
     def playlist_add(self, file):
         self.playlist_calls.append(("add", file))
         self.playlist.append(file)
+        # Playing a browsed item goes through the playlist now, so "what was played"
+        # is the same list the assertions already read.
+        self.opened.append(file)
 
     def playlist_remove(self, position):
         self.playlist_calls.append(("remove", position))
@@ -165,7 +170,7 @@ class FakeClient:
         self.opened.append(file)
 
     def active_players(self):
-        return []
+        return [{"playerid": 1}] if self.playing else []
 
     def ping(self):
         return "pong"
@@ -1228,7 +1233,9 @@ def test_replacing_playback_stops_first():
         pump(0.5)
         events = []
         client.stop = lambda playerid: events.append(("stop", playerid))
-        client.open_item = lambda file: events.append(("open", file))
+        client.playlist_clear = lambda: events.append(("clear",))
+        client.playlist_add = lambda file: events.append(("add", file))
+        client.playlist_open = lambda position: events.append(("open", position))
         window._select_index(1)
         pump(0.2)
         wanted = window.visible_tiles[1].payload.file
@@ -1237,7 +1244,8 @@ def test_replacing_playback_stops_first():
         client.active_players = lambda: [{"playerid": 3}]
         started = time.monotonic()
         assert press(window, Gdk.KEY_Return) is True
-        assert pump_until(lambda: events == [("stop", 3), ("open", wanted)], timeout=6), events
+        assert pump_until(lambda: events == [("stop", 3), ("clear",), ("add", wanted),
+                                             ("open", 0)], timeout=6), events
         elapsed = time.monotonic() - started
         assert elapsed >= ui.REPLACE_PAUSE - 0.1, (
             f"the new file was opened {elapsed:.2f}s after the stop, "
@@ -1248,7 +1256,8 @@ def test_replacing_playback_stops_first():
         client.active_players = lambda: []
         started = time.monotonic()
         assert press(window, Gdk.KEY_Return) is True
-        assert pump_until(lambda: events == [("open", wanted)], timeout=4), events
+        assert pump_until(lambda: events == [("clear",), ("add", wanted), ("open", 0)],
+                          timeout=4), events
         idle = time.monotonic() - started
         assert idle < 1.0, f"an idle selection waited {idle:.2f}s for nothing"
     finally:
@@ -1956,10 +1965,16 @@ def test_a_seek_drag_commits_once_and_the_poll_leaves_it_alone():
         window._update_now_page(LIVE_STATE)
         pump(0.1)
 
-        for value in (700, 900, 1200):
-            # Re-arm first: the 1 Hz tick lands between pumps and clears `player`
-            # from the fake's empty playback_state, and `_on_seek` is a no-op then.
+        def live_poll():
+            # What a real tick delivers while the finger is down. Without it the bar
+            # can still be at the 0..1 range a "nothing playing" poll left behind, and
+            # set_value(1200) clamps to 1 — a test artefact, not a UI bug.
             window.player = dict(LIVE_STATE)
+            window._update_now_page(LIVE_STATE)
+
+        live_poll()
+        for value in (700, 900, 1200):
+            live_poll()
             window._on_seek(window.now_scale, None, value)
         assert client.seeks == [], f"a drag seeked per change event: {client.seeks}"
         assert window.now_elapsed.get_label() == kodi.clock(1200), window.now_elapsed.get_label()
@@ -2088,9 +2103,25 @@ def test_add_to_queue_and_work_the_list():
         pump(0.2)
         assert getattr(window, "menu_queue", None) is not None, "the menu has no Add to queue"
         window.menu_queue.emit("clicked")
-        assert pump_until(lambda: client.playlist == ["plugin://x/clip0.mkv"]), client.playlist
+        # Nothing playing: the item is added AND the queue is started, or it would sit
+        # in a list nothing ever plays.
+        assert pump_until(lambda: client.playlist_calls == [
+            ("add", "plugin://x/clip0.mkv"), ("open", 0)]), client.playlist_calls
         window._close_menu()
         pump(0.1)
+
+        # Something playing: append only, and the box is not asked to start it.
+        client.playlist_calls.clear()
+        client.playing = True
+        window._menu_for_selection()
+        pump(0.2)
+        window.menu_queue.emit("clicked")
+        assert pump_until(lambda: client.playlist_calls == [("add", "plugin://x/clip0.mkv")]), \
+            client.playlist_calls
+        pump(0.3)
+        assert client.playlist_calls == [("add", "plugin://x/clip0.mkv")], client.playlist_calls
+        client.playing = False
+        window._close_menu()
 
         # A folder cannot be queued.
         window.entries = [kodi.Entry({"label": "Folder", "file": "plugin://x/sub/",

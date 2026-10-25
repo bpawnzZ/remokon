@@ -392,6 +392,34 @@ def test_transport():
         server.shutdown()
 
 
+def test_a_player_that_vanishes_mid_poll_is_not_an_error():
+    """The item ends between GetActivePlayers and the follow-up calls.
+
+    Kodi answers those with an error; raising would fail the whole 1 Hz poll, and the
+    window would keep showing the finished video for ever.
+    """
+    def boom(*_args, **_kwargs):
+        raise KodiError("Failed to execute method.", -32100)
+
+    half_dead = type("HalfDead", (), {
+        "active_players": lambda self: [{"playerid": 1, "type": "video"}],
+        "player_item": boom,
+        "player_properties": boom,
+    })()
+    assert kodi.playback_state(half_dead) is None
+
+    # The window call failing must not take the item down with it either.
+    gui_dead = type("GuiDead", (), {
+        "active_players": lambda self: [{"playerid": 1, "type": "video"}],
+        "player_item": lambda self, pid: Entry({"label": "T", "file": "/x"}),
+        "player_properties": lambda self, pid: {"percentage": 1.0, "speed": 1},
+        "_call": boom,
+    })()
+    state = kodi.playback_state(gui_dead)
+    assert state is not None and state["title"] == "T", state
+    assert state["fullscreen_video"] is False, state
+
+
 def test_playlist_calls():
     """The queue is the box's playlist, one call per button.
 

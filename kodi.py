@@ -366,12 +366,23 @@ def playback_state(client: KodiClient) -> dict | None:
     if not players:
         return None
     playerid = players[0].get("playerid", 0)
-    item = client.player_item(playerid)
-    props = client.player_properties(playerid)
+    try:
+        item = client.player_item(playerid)
+        props = client.player_properties(playerid)
+    except KodiError:
+        # The item ended between GetActivePlayers and these two calls, which Kodi
+        # answers with "Failed to execute method" for a player that is already gone.
+        # Report "nothing playing": raising here fails the whole 1 Hz poll, and the
+        # last snapshot then stays on screen for ever — a finished video that never
+        # clears itself.
+        return None
     # Which window has focus decides what an arrow key means: in the fullscreen
     # video window Kodi binds left/right to StepBack/StepForward, and a client that
     # sends the navigation *actions* bypasses that binding (measured on iOS).
-    gui = client._call("GUI.GetProperties", {"properties": ["fullscreen", "currentwindow"]})
+    try:
+        gui = client._call("GUI.GetProperties", {"properties": ["fullscreen", "currentwindow"]})
+    except KodiError:
+        gui = {}
     gui = gui if isinstance(gui, dict) else {}  # a host that answers "OK" must not kill the poll
     window = gui.get("currentwindow") or {}
     elapsed = _hms(props.get("time"))

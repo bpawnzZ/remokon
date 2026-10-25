@@ -193,6 +193,14 @@ def on_main(fn, *args):
     GLib.idle_add(lambda: (fn(*args), False)[1])
 
 
+def optional(fn, default=None):
+    """A call the poll can live without: a refusal degrades that piece, not the tick."""
+    try:
+        return fn()
+    except KodiError:
+        return default
+
+
 def run(fn, on_ok, on_error=None):
     """Call `fn()` on a worker thread and hand the result back on the GTK thread."""
 
@@ -500,6 +508,8 @@ class Window(Adw.ApplicationWindow):
         self.toasts = Adw.ToastOverlay()
         self.toasts.set_child(self.toolbar)
         self.set_content(self.toasts)
+        # Both panes exist now, so the player's breakpoint can account for them.
+        self._size_now_page()
 
         keys = Gtk.EventControllerKey()
         keys.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
@@ -744,15 +754,33 @@ class Window(Adw.ApplicationWindow):
         # measured minimum width follow the narrow layout. (A `notify::default-width`
         # check did not fire on a programmatic resize, so the window stayed horizontal
         # at 780 px with the art crushed to 120.)
-        narrow = Gtk.Orientation.VERTICAL
-        breakpoint = Adw.Breakpoint(
+        self._now_breakpoint = Adw.Breakpoint(
             condition=Adw.BreakpointCondition.parse("max-width: 900px"))
-        breakpoint.add_setter(self.now_stage, "orientation",
-                              GObject.Value(Gtk.Orientation, narrow))
-        breakpoint.add_setter(self.now_media, "height_request", GObject.Value(int, 200))
-        breakpoint.add_setter(self.now_art_frame, "ratio", GObject.Value(float, 16 / 9))
-        self.add_breakpoint(breakpoint)
+        self._now_breakpoint.add_setter(self.now_stage, "orientation",
+                                        GObject.Value(Gtk.Orientation, Gtk.Orientation.VERTICAL))
+        self._now_breakpoint.add_setter(self.now_media, "height_request",
+                                        GObject.Value(int, 200))
+        self._now_breakpoint.add_setter(self.now_art_frame, "ratio",
+                                        GObject.Value(float, 16 / 9))
+        self.add_breakpoint(self._now_breakpoint)
         return page
+
+    def _size_now_page(self):
+        """Move the player's breakpoint with the panes, not just the window.
+
+        A breakpoint can only see the window's width, but two open side panes take
+        ~500 px the stage cannot use: at a 1100 px window with the sidebar and the queue
+        both open the pane is 598 px, and a "wide" stage there is 800 px of layout in
+        598 px of space.
+        """
+        sidebar = getattr(self, "sidebar_pane", None)
+        queue = getattr(self, "queue_pane", None)
+        # 810 px is what the side-by-side stage actually needs (280 art + the controls
+        # column); measured, not guessed.
+        inline = 810 + (SIDEBAR_WIDTH if sidebar is not None and sidebar.get_visible() else 0) \
+            + ((QUEUE_WIDTH + 1) if queue is not None and queue.get_visible() else 0)
+        self._now_breakpoint.set_condition(
+            Adw.BreakpointCondition.parse(f"max-width: {inline}px"))
 
 
     def _build_queue_panel(self) -> Gtk.Widget:
@@ -1730,12 +1758,19 @@ class Window(Adw.ApplicationWindow):
         # intermittently, so a replacement is stop → wait → open. The whole sequence
         # is on the worker: the pause costs the window nothing, and asking the box
         # beats trusting `self.player`, which can be a second stale either way.
+        #
+        # It plays THROUGH the box's video playlist rather than opening a bare file:
+        # Kodi only advances to the next item when the current one came from the
+        # playlist, so a direct `Player.Open {file}` left everything added to the queue
+        # as dead weight — the classic "my queue never plays".
         def swap():
             players = self.client.active_players()
             if players:
                 self.client.stop(players[0]["playerid"])
                 time.sleep(REPLACE_PAUSE)
-            return self.client.open_item(file)
+            self.client.playlist_clear()
+            self.client.playlist_add(file)
+            return self.client.playlist_open(0)
 
         run(swap, ok, lambda error: self.toasts.add_toast(Adw.Toast(title=str(error), timeout=5)))
 
@@ -1773,11 +1808,14 @@ class Window(Adw.ApplicationWindow):
         watch_volume = page == "now"
 
         def poll():
+            # Each of these is optional: one refusal used to raise, fail the whole tick
+            # and freeze the window on its last snapshot (a finished video that never
+            # cleared, a queue that stopped updating).
             state = kodi.playback_state(client)
             if state is not None and watch_volume:
-                state.update(kodi.volume_state(client))
-            window = kodi.current_window(client) if watch_text else None
-            queue = client.playlist_items() if watch_queue else None
+                state.update(optional(lambda: kodi.volume_state(client), {}) or {})
+            window = optional(lambda: kodi.current_window(client)) if watch_text else None
+            queue = optional(lambda: client.playlist_items()) if watch_queue else None
             return state, window, queue
 
         def failed(_error):
@@ -2171,6 +2209,7 @@ class Window(Adw.ApplicationWindow):
         """Slide the queue in or out. Shown, it re-reads the box's playlist."""
         want = (not self.queue_pane.get_visible()) if show is None else show
         self.queue_pane.set_visible(want)
+        self._size_now_page()
         self.queue_button.set_tooltip_text(
             ("Hide" if want else "Show") + " the queue: what the box plays next (q)")
         if want:
@@ -2303,12 +2342,23 @@ class Window(Adw.ApplicationWindow):
         if not path:
             return
 
-        def done(_result):
-            self.toasts.add_toast(Adw.Toast(title=f"Queued {title}", timeout=3))
+        def add():
+            """Append, and start the queue if the box is idle — otherwise the item
+            joins a list nothing will ever play."""
+            self.client.playlist_add(path)
+            if self.client.active_players():
+                return False
+            self.client.playlist_open(0)
+            return True
+
+        def done(started):
+            self.toasts.add_toast(Adw.Toast(
+                title=f"Playing {title}" if started else f"Queued {title}", timeout=3))
             if self.queue_pane.get_visible():
                 self._refresh_queue()
+            self._tick()
 
-        run(lambda: self.client.playlist_add(path), done, self._seek_failed)
+        run(add, done, self._seek_failed)
 
     def _in_queue(self) -> bool:
         widget = self.get_focus()
@@ -2572,6 +2622,7 @@ class Window(Adw.ApplicationWindow):
         """Fold the add-on sidebar away and give the width to the content pane."""
         show = not self.sidebar_pane.get_visible()
         self.sidebar_pane.set_visible(show)
+        self._size_now_page()
         self.sidebar_button.set_tooltip_text(
             ("Hide" if show else "Show") + " the add-on sidebar (Ctrl+B)")
         if not show and self._in_sidebar():
