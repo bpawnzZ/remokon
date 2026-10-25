@@ -51,7 +51,10 @@ PAGE_CYCLE = {"grid": "remote", "remote": "now", "now": "grid"}
 # A drag on the seek bar or the volume slider commits once it stops moving, so a
 # drag is one JSON-RPC call instead of one per pixel.
 DRAG_DEBOUNCE_MS = 300
-QUEUE_WIDTH = 126
+SIDEBAR_WIDTH = 250
+# The queue is the other side of the same window: same width as the add-on pane, so the
+# two read as a pair rather than one being a stripe.
+QUEUE_WIDTH = SIDEBAR_WIDTH
 
 # One place for the two things GTK cannot infer: the focus ring (the app is
 # keyboard first, so the selection must be impossible to lose) and the bar's
@@ -443,7 +446,8 @@ class Window(Adw.ApplicationWindow):
         self.toolbar.add_top_bar(self.crumbs)
         self.toolbar.add_bottom_bar(self._build_now_playing())
 
-        sidebar = Gtk.ScrolledWindow(width_request=250, hscrollbar_policy=Gtk.PolicyType.NEVER)
+        sidebar = Gtk.ScrolledWindow(width_request=SIDEBAR_WIDTH,
+                                     hscrollbar_policy=Gtk.PolicyType.NEVER)
         self.sidebar = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE,
                                    css_classes=["navigation-sidebar"])
         self.sidebar.connect("row-activated", self._on_sidebar_activated)
@@ -479,7 +483,11 @@ class Window(Adw.ApplicationWindow):
         # An Adw.Clamp, because a Gtk.Widget has a MINIMUM width and no maximum: with a
         # bare width_request the body Box happily handed the pane its 460 px natural
         # width instead of the 126 it asked for. The clamp is the native cap.
-        self.queue_pane.append(Adw.Clamp(maximum_size=QUEUE_WIDTH, tightening_threshold=0))
+        # `hexpand=False` is the point: an Adw.Clamp expands to fill the space it is
+        # given and only caps its CHILD, so the pane was ~600 px of empty panel with the
+        # 126 px content centred inside it.
+        self.queue_pane.append(Adw.Clamp(maximum_size=QUEUE_WIDTH, tightening_threshold=0,
+                                         hexpand=False))
         self.queue_pane.get_last_child().set_child(self._build_queue_panel())
         self.queue_pane.set_visible(False)
 
@@ -754,7 +762,7 @@ class Window(Adw.ApplicationWindow):
         ago, and every button is one `Playlist.*` call followed by a re-read, so the
         panel can never show an order the box does not have.
         """
-        panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, width_request=QUEUE_WIDTH)
 
         header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2,
                          margin_top=8, margin_bottom=6, margin_start=8, margin_end=4)
@@ -2222,20 +2230,15 @@ class Window(Adw.ApplicationWindow):
         # The row's own buttons act on the position the BOX reported, not on an index
         # the app is holding: the playlist can move under it.
         row.position = index
-        # Two lines, because the panel is only 180 px wide: a title and four buttons on
-        # one line leaves the title about twenty pixels.
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1,
-                      margin_top=3, margin_bottom=3, margin_start=6, margin_end=2)
-        heading = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-        heading.append(Gtk.Label(label=f"{index + 1}", width_chars=2, xalign=1.0,
-                                 css_classes=["queue-num"]))
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=3,
+                      margin_top=2, margin_bottom=2, margin_start=8, margin_end=4)
+        box.append(Gtk.Label(label=f"{index + 1}", width_chars=2, xalign=1.0,
+                             css_classes=["queue-num"]))
         if playing:
-            heading.append(Gtk.Image(icon_name="media-playback-start-symbolic", pixel_size=12))
-        heading.append(Gtk.Label(label=item.heading, xalign=0.0, hexpand=True,
-                                 ellipsize=Pango.EllipsizeMode.END, max_width_chars=14,
-                                 tooltip_text=item.heading))
-        box.append(heading)
-        controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
+            box.append(Gtk.Image(icon_name="media-playback-start-symbolic", pixel_size=12))
+        box.append(Gtk.Label(label=item.heading, xalign=0.0, hexpand=True,
+                             ellipsize=Pango.EllipsizeMode.END, max_width_chars=22,
+                             tooltip_text=item.heading))
         for icon, tooltip, action in (("go-up-symbolic", "Move up", "up"),
                                       ("go-down-symbolic", "Move down", "down"),
                                       ("media-playback-start-symbolic", "Play now", "play"),
@@ -2244,8 +2247,7 @@ class Window(Adw.ApplicationWindow):
                                 css_classes=["flat"], width_request=24, height_request=24)
             button.connect("clicked",
                            lambda _b, a=action, p=index: self._queue_action(a, p))
-            controls.append(button)
-        box.append(controls)
+            box.append(button)
         row.set_child(box)
         return row
 

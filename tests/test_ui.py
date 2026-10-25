@@ -2048,6 +2048,13 @@ def test_the_queue_is_hidden_until_asked_and_q_toggles_it():
         assert window.queue_pane.get_visible() is True, "`q` did not open the queue"
         assert pump_until(lambda: window.queue_list.get_row_at_index(1) is not None), "no rows"
         assert window.queue_title.get_label() == "Queue \u00b7 2", window.queue_title.get_label()
+        # A pane, not a stripe of leftover width: Adw.Clamp caps its CHILD, and the clamp
+        # itself still expanded (a ~600 px empty panel with 126 px of content centred in
+        # it) until it was told not to. Same width as the add-on pane, and it stays put.
+        assert abs(window.queue_pane.get_width() - ui.QUEUE_WIDTH) <= 2, \
+            f"the queue pane is {window.queue_pane.get_width()} px, not {ui.QUEUE_WIDTH}"
+        assert abs(window.queue_pane.get_width() - window.sidebar_pane.get_width()) <= 2, \
+            "the queue and the add-on pane are not the same width"
         assert buttons(window.queue_list.get_row_at_index(0)) == 4, "a row is missing its buttons"
 
         assert press(window, Gdk.KEY_q) is True
