@@ -43,7 +43,14 @@ ZOOM_SCALE = {0: 0.85, 1: 1.0, 2: 1.3}
 # The list has its own sizes, because "bigger items" has to mean something there
 # too: art height drives the row height.
 ROW_ZOOM = {0: (30, 42), 1: (40, 56), 2: (58, 82)}
-NOW_ART_SIZE = (440, 300)
+NOW_ART_SIZE = (560, 340)
+# `\` walks the three surfaces in this order and wraps: one key, three places to be.
+# Pages absent from the map (settings, notice, loading) make the key inert there.
+PAGE_CYCLE = {"grid": "remote", "remote": "now", "now": "grid"}
+# A drag on the seek bar or the volume slider commits once it stops moving, so a
+# drag is one JSON-RPC call instead of one per pixel.
+DRAG_DEBOUNCE_MS = 300
+QUEUE_WIDTH = 300
 
 # One place for the two things GTK cannot infer: the focus ring (the app is
 # keyboard first, so the selection must be impossible to lose) and the bar's
@@ -73,16 +80,29 @@ flowboxchild:focus { outline: 3px solid @accent_bg_color; outline-offset: -2px; 
 .sidebar-name { font-weight: 600; }
 
 /* Now playing: one stage that reads at a glance from across the room. */
-.np-stage { border-radius: 20px; padding: 20px;
+.np-stage { border-radius: 22px; padding: 22px;
             background-image: linear-gradient(135deg, alpha(@accent_bg_color, 0.38),
                                               alpha(@accent_bg_color, 0.04)); }
-.np-title { font-size: 19pt; font-weight: 800; }
+.np-art { border-radius: 16px; background-color: alpha(currentColor, 0.06); }
+.np-title { font-size: 22pt; font-weight: 800; }
+.np-plot { font-size: 0.95em; opacity: 0.78; }
 .np-chip { font-size: 0.85em; padding: 2px 12px; border-radius: 99px;
            background-color: alpha(currentColor, 0.14); }
 .np-play { min-width: 62px; min-height: 62px; border-radius: 99px; }
 .np-scale trough { min-height: 8px; border-radius: 99px; }
 .np-scale highlight { border-radius: 99px; }
+.np-time { opacity: 0.8; font-feature-settings: "tnum"; }
+.np-transport button { min-height: 38px; border-radius: 10px; }
 .now-playing { border-top: 1px solid alpha(currentColor, 0.10); }
+
+/* The queue: what comes next, docked on the right. */
+.queue-head { font-weight: 700; }
+.queue-row { border-radius: 10px; padding: 2px 2px; }
+.queue-row.playing { background-color: alpha(@accent_bg_color, 0.20); }
+.queue-row:focus { outline: 2px solid @accent_bg_color; outline-offset: -2px; }
+.queue-num { opacity: 0.55; font-feature-settings: "tnum"; font-weight: 700; }
+.queue-empty { opacity: 0.7; }
+listbox.queue > row:selected { background: none; }
 
 /* List view: one row per entry, so a 200-item plugin listing is readable and
    scrolls at a constant cost per row. */
@@ -216,7 +236,8 @@ HELP = (
         (",  .", "seek back / forward while a video plays"),
         ("v", "next view: posters, compact, wide, list"),
         ("Ctrl +  Ctrl -", "bigger / smaller tiles"),
-        ("c", "menu for the selection (also right-click)"),
+        ("c", "menu for the selection: play, add to queue, \u2605 (also right-click)"),
+        ("q", "queue panel \u2014 what the box will play next"),
         ("Ctrl+B", "hide or show the sidebar"),
         ("n", "now playing"),
     )),
@@ -237,17 +258,32 @@ HELP = (
         ("t", "type into the box's keyboard dialog"),
         ("r   \\", "back to browsing"),
     )),
+    ("Now playing", (
+        ("\u2190 \u2192", "seek 10 seconds back / forward"),
+        ("Space", "play / pause"),
+        ("Prev  Next", "the previous / next item in the queue"),
+        ("drag the bar", "seek anywhere in the item"),
+        ("\u221260 s  +60 s", "the long jumps on the page (also PgUp / PgDn)"),
+        ("Enter", "select (OSD while a video is fullscreen)"),
+        ("i   o", "info \u00b7 player process info"),
+        ("c   f   m", "context menu \u00b7 fullscreen \u00b7 mute"),
+        ("x   h", "stop \u00b7 home on the box"),
+        ("1\u20139   0   =  -", "set the volume \u00b7 mute \u00b7 volume up / down"),
+        ("t", "type into the box's keyboard dialog"),
+        ("Escape  Backspace", "back to browsing"),
+        ("\\", "on to the browse surface"),
+    )),
     ("Everywhere", (
         ("Space", "play / pause, on any page"),
         ("x", "stop, on any page"),
         ("?  ", "this list"),
-        ("\\", "browse \u2194 remote, same window, same place"),
+        ("\\", "browse \u2192 remote \u2192 now playing \u2192 browse"),
         ("gear (top right)", "settings: host, scheme, user, password"),
     )),
     ("Mouse", (
         ("click", "open a folder, or play an item"),
-        ("right-click", "item menu: open/play, ★ Favourites"),
-        ("wheel", "scroll the grid or a list"),
+        ("right-click", "item menu: play, add to queue, \u2605 Favourites"),
+        ("wheel", "scroll the grid, a list, or seek on the player's bar"),
     )),
 )
 
@@ -293,6 +329,15 @@ class Window(Adw.ApplicationWindow):
 
         self._gen = 0          # bumps on every render; stale image arrivals are dropped
         self._polling = False
+        # A drag owns the seek handle until it commits: `_seek_target` is the pending
+        # position and `_seek_timer` the one-shot that sends it. The volume slider
+        # works the same way through `_volume_timer`.
+        self._seek_target: int | None = None
+        self._seek_timer: int | None = None
+        self._volume_timer: int | None = None
+        # Last queue the panel was built from, so a row's buttons act on the position
+        # the box reported rather than one the app remembers.
+        self._queue_items: list[Entry] = []
 
         self._build()
         self._update_nav_buttons()
@@ -365,6 +410,13 @@ class Window(Adw.ApplicationWindow):
                                         tooltip_text="Remote (r)")
         self.remote_button.connect("clicked", lambda *_: self._show_remote())
         header.pack_start(self.remote_button)
+        # The queue rides beside the Remote: `media-playlist-consecutive-symbolic` is
+        # the playlist glyph Adwaita ships (there is no plain `media-playlist`), and a
+        # mistyped icon name draws nothing at all while staying clickable.
+        self.queue_button = Gtk.Button(icon_name="media-playlist-consecutive-symbolic",
+                                       tooltip_text="Queue: what the box plays next (q)")
+        self.queue_button.connect("clicked", lambda *_: self._toggle_queue())
+        header.pack_start(self.queue_button)
 
         # Settings is the host form (the first screen when there is no host) and help is
         # the only place the shortcut map is written down. Both sit at the end: neither
@@ -412,9 +464,20 @@ class Window(Adw.ApplicationWindow):
         self.sidebar_pane.append(sidebar)
         self.sidebar_pane.append(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL))
 
+        # The queue is the same idea on the other side: a pane, not a page, so the
+        # browse surface keeps working while it is open. Plain visibility, like the
+        # sidebar — a Gtk.Revealer here measured 108 px while shut (a transition that
+        # never runs before the window is mapped), which silently stole the width from
+        # the content pane on first layout.
+        self.queue_pane = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        self.queue_pane.append(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL))
+        self.queue_pane.append(self._build_queue_panel())
+        self.queue_pane.set_visible(False)
+
         body = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
         body.append(self.sidebar_pane)
         body.append(self.stack)
+        body.append(self.queue_pane)
         self.toolbar.set_content(body)
 
         self.toasts = Adw.ToastOverlay()
@@ -533,60 +596,165 @@ class Window(Adw.ApplicationWindow):
         return self.view_stack
 
     def _build_now_page(self) -> Gtk.Widget:
-        """The full player: artwork, title, a seek bar and the transport.
+        """The full player: art, metadata, a draggable seek bar and the transport.
 
         It reads the same 1 Hz snapshot as the bar, so the two can never disagree
         about what is playing."""
-        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14,
-                       valign=Gtk.Align.CENTER, halign=Gtk.Align.CENTER,
-                       margin_top=18, margin_bottom=18, margin_start=18, margin_end=18)
+
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,
+                       margin_top=18, margin_bottom=18, margin_start=18, margin_end=18,
+                       halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER)
 
         self.now_media = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,
-                                 width_request=420, height_request=300,
-                                 halign=Gtk.Align.CENTER)
-        self.now_media.append(Gtk.Image(icon_name="media-optical-symbolic", pixel_size=96,
-                                        hexpand=True, vexpand=True, css_classes=["placeholder-icon"],
+                                 width_request=NOW_ART_SIZE[0], height_request=NOW_ART_SIZE[1],
+                                 css_classes=["np-art"], halign=Gtk.Align.CENTER)
+        self.now_media.append(Gtk.Image(icon_name="media-optical-symbolic", pixel_size=120,
+                                        hexpand=True, vexpand=True,
+                                        css_classes=["placeholder-icon"],
                                         halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER))
 
         self.now_title = Gtk.Label(label="Nothing playing", wrap=True, lines=2,
                                    justify=Gtk.Justification.CENTER,
-                                   max_width_chars=34, css_classes=["np-title"])
+                                   max_width_chars=40, css_classes=["np-title"])
         self.now_subtitle = Gtk.Label(label="", css_classes=["np-chip"], wrap=True,
                                       halign=Gtk.Align.CENTER)
+        # Year and plot: a library item has both, a live stream neither, so the line
+        # simply stays empty when the box reports nothing.
+        self.now_plot = Gtk.Label(label="", wrap=True, lines=3,
+                                  justify=Gtk.Justification.CENTER, max_width_chars=64,
+                                  css_classes=["np-plot"])
 
+        self.now_elapsed = Gtk.Label(label="0:00", width_chars=7, xalign=1.0,
+                                     css_classes=["np-time"])
+        self.now_total = Gtk.Label(label="0:00", width_chars=7, xalign=0.0,
+                                   css_classes=["np-time"])
         self.now_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 1, 1)
-        self.now_scale.set_size_request(440, -1)
+        self.now_scale.set_hexpand(True)
         self.now_scale.add_css_class("np-scale")
         self.now_scale.set_draw_value(False)
         self.now_scale.set_sensitive(False)
         self.now_scale.connect("change-value", self._on_seek)
+        seek_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10,
+                           width_request=NOW_ART_SIZE[0])
+        seek_row.append(self.now_elapsed)
+        seek_row.append(self.now_scale)
+        seek_row.append(self.now_total)
 
-        self.now_time = Gtk.Label(label="", css_classes=["dim-label"])
+        self.now_buttons: dict[str, Gtk.Button] = {}
 
-        transport = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=14,
+        def button(box: Gtk.Box, name: str, tooltip: str, handler,
+                   label: str | None = None, icon: str | None = None,
+                   extra: tuple[str, ...] = ()) -> Gtk.Button:
+            item = Gtk.Button(tooltip_text=tooltip, css_classes=list(extra))
+            if label is not None:
+                item.set_label(label)
+            if icon is not None:
+                item.set_icon_name(icon)
+            item.connect("clicked", lambda *_a: handler())
+            self.now_buttons[name] = item
+            box.append(item)
+            return item
+
+        # `Player.GoTo` walks the box's own playlist: the queue panel and these two
+        # buttons are the same list seen from two sides.
+        transport = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
+                            halign=Gtk.Align.CENTER, css_classes=["np-transport"])
+        button(transport, "prev", "Previous item in the queue",
+               lambda: self._player_goto("previous"), icon="media-skip-backward-symbolic")
+        button(transport, "back60", "Back one minute (PgUp)",
+               lambda: self._seek_by(-60), label="\u221260 s")
+        button(transport, "back10", "Back 10 seconds (Left)",
+               lambda: self._seek_by(-10), label="\u221210 s")
+        button(transport, "play", "Play / pause (Space)", self._play_pause,
+               icon="media-playback-start-symbolic",
+               extra=("np-play", "suggested-action"))
+        button(transport, "stop", "Stop", self._stop, icon="media-playback-stop-symbolic")
+        button(transport, "fwd10", "Forward 10 seconds (Right)",
+               lambda: self._seek_by(10), label="+10 s")
+        button(transport, "fwd60", "Forward one minute (PgDn)",
+               lambda: self._seek_by(60), label="+60 s")
+        button(transport, "next", "Next item in the queue",
+               lambda: self._player_goto("next"), icon="media-skip-forward-symbolic")
+
+        # Volume and the box key that belongs beside it. `GUI.GetProperties` already
+        # answers `volume`/`muted` in the poll, so this row costs no extra call.
+        utilities = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
                             halign=Gtk.Align.CENTER)
-        self.now_play = Gtk.Button(icon_name="media-playback-start-symbolic",
-                                   tooltip_text="Play / pause (Space)",
-                                   css_classes=["np-play", "suggested-action"])
-        self.now_play.connect("clicked", lambda *_: self._play_pause())
-        self.now_back = Gtk.Button(label="−10 s", tooltip_text="Back 10 seconds (Left)")
-        self.now_back.connect("clicked", lambda *_: self._seek_by(-10))
-        self.now_stop = Gtk.Button(icon_name="media-playback-stop-symbolic", tooltip_text="Stop")
-        self.now_stop.connect("clicked", lambda *_: self._stop())
-        self.now_fwd = Gtk.Button(label="+10 s", tooltip_text="Forward 10 seconds (Right)")
-        self.now_fwd.connect("clicked", lambda *_: self._seek_by(10))
-        for button in (self.now_back, self.now_play, self.now_stop, self.now_fwd):
-            button.set_sensitive(False)
-            transport.append(button)
+        button(utilities, "mute", "Mute (m)", lambda: self._send("mute"),
+               icon="audio-volume-high-symbolic")
+        self.now_volume = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 1)
+        self.now_volume.set_size_request(200, -1)
+        self.now_volume.set_draw_value(False)
+        self.now_volume.add_css_class("np-scale")
+        self.now_volume.set_sensitive(False)
+        self.now_volume.connect("change-value", self._on_volume)
+        utilities.append(self.now_volume)
+        button(utilities, "fullscreen", "Fullscreen (f)", lambda: self._send("fullscreen"),
+               icon="view-fullscreen-symbolic")
+        button(utilities, "info", "Player process info (o)",
+               lambda: self._send("codecinfo"), icon="dialog-information-symbolic")
 
         stage = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
                         css_classes=["np-stage"], halign=Gtk.Align.CENTER)
-        for widget in (self.now_media, self.now_title, self.now_subtitle,
-                       self.now_scale, self.now_time, transport):
+        for widget in (self.now_media, self.now_title, self.now_subtitle, self.now_plot,
+                       seek_row, transport, utilities):
             stage.append(widget)
+        stage.append(Gtk.Label(
+            label="\u2190 \u2192 seek 10 s  \u00b7  PgUp / PgDn one minute  \u00b7  "
+                  "Space play / pause  \u00b7  \\ cycles the pages",
+            css_classes=["dim-label"], halign=Gtk.Align.CENTER))
         page.append(stage)
+
         self._now_art = ""
-        return page
+        # Scrolled like the Remote page: on a small window the stage is taller than the
+        # pane, and a clipped player is worse than a scrollable one.
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_child(page)
+        return scroll
+
+    def _build_queue_panel(self) -> Gtk.Widget:
+        """The box's video playlist, docked on the right.
+
+        Nothing is stored here: every row is what `Playlist.GetItems` said a moment
+        ago, and every button is one `Playlist.*` call followed by a re-read, so the
+        panel can never show an order the box does not have.
+        """
+        panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, width_request=QUEUE_WIDTH)
+
+        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4,
+                         margin_top=8, margin_bottom=6, margin_start=12, margin_end=6)
+        self.queue_title = Gtk.Label(label="Queue", xalign=0.0, hexpand=True,
+                                     css_classes=["queue-head"])
+        header.append(self.queue_title)
+        self.queue_clear_button = Gtk.Button(icon_name="list-remove-all-symbolic",
+                                             tooltip_text="Clear the queue",
+                                             css_classes=["flat"])
+        self.queue_clear_button.connect("clicked", lambda *_: self._clear_queue())
+        header.append(self.queue_clear_button)
+        self.queue_close_button = Gtk.Button(icon_name="window-close-symbolic",
+                                             tooltip_text="Hide the queue (q)",
+                                             css_classes=["flat"])
+        self.queue_close_button.connect("clicked", lambda *_: self._toggle_queue(False))
+        header.append(self.queue_close_button)
+        panel.append(header)
+
+        self.queue_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE,
+                                      activate_on_single_click=False,
+                                      css_classes=["queue"])
+        self.queue_list.connect("row-activated", self._on_queue_activated)
+        self.queue_scroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER,
+                                              vexpand=True)
+        self.queue_scroll.set_child(self.queue_list)
+        panel.append(self.queue_scroll)
+
+        self.queue_empty = Gtk.Label(
+            label="Nothing queued yet.\n\nPress c on an item \u2014 or right-click it "
+                  "\u2014 and choose Add to queue.",
+            wrap=True, justify=Gtk.Justification.CENTER, css_classes=["queue-empty"],
+            margin_top=24, margin_bottom=24, margin_start=18, margin_end=18)
+        panel.append(self.queue_empty)
+        self.queue_scroll.set_visible(False)
+        return panel
 
     def _build_remote_page(self) -> Gtk.Widget:
         """A keyboard-first remote: on this page the arrows go to the box, not to
@@ -1339,6 +1507,14 @@ class Window(Adw.ApplicationWindow):
             "starred-symbolic" if saved else "non-starred-symbolic", "Favourites",
             "Remove from Favourites" if saved else "Add to Favourites",
             lambda: self._toggle_favourite(payload))
+        # Only something the box can actually play can be queued: a folder's plugin
+        # path either queues a directory or is refused outright. Cleared first, so a
+        # menu built for a folder cannot leave the previous item's button behind.
+        self.menu_queue = None
+        if playable:
+            self.menu_queue = item("list-add-symbolic", "Add to queue",
+                                   "Play this after whatever is playing now",
+                                   lambda: self._add_to_queue(payload))
 
         # Parented to the WINDOW, not to the card: a FlowBoxChild is not a native, and
         # a popover parented to a non-native widget cannot create its surface.
@@ -1537,23 +1713,35 @@ class Window(Adw.ApplicationWindow):
         client = self.client
         # A text dialog only means something on the page that drives the box, and it
         # keeps the idle cost at one call a second while browsing.
-        watch_text = page == "remote"
+        watch_text = page in ("remote", "now")
+        # The queue is re-read only while it is on screen: a closed panel asks the box
+        # nothing at all.
+        watch_queue = self.queue_pane.get_visible()
+        # The volume row only exists on the player, so the extra call is only made there.
+        watch_volume = page == "now"
 
         def poll():
             state = kodi.playback_state(client)
-            return state, (kodi.current_window(client) if watch_text else None)
+            if state is not None and watch_volume:
+                state.update(kodi.volume_state(client))
+            window = kodi.current_window(client) if watch_text else None
+            queue = client.playlist_items() if watch_queue else None
+            return state, window, queue
 
         def failed(_error):
             self._polling = False
 
-        run(poll, lambda result: self._state(result[0], result[1]), failed)
+        run(poll, lambda result: self._state(result[0], result[1], result[2]), failed)
         return True
 
-    def _state(self, state: dict | None, window: dict | None = None):
+    def _state(self, state: dict | None, window: dict | None = None,
+               queue: list[Entry] | None = None):
         self._polling = False
         self.player = state
         self._watch_text_dialog(window)
         self._update_now_page(state)
+        if queue is not None:
+            self._fill_queue(queue, (state or {}).get("position"))
         if state:
             self.np_title.set_label(state["title"])
             self.np_progress.set_fraction(max(0.0, min(1.0, state["percentage"] / 100.0)))
@@ -1605,8 +1793,7 @@ class Window(Adw.ApplicationWindow):
     def _set_volume(self, percent: int):
         if self.client is None:
             return
-        run(lambda: self.client._call("Application.SetVolume", {"volume": percent}),
-            lambda _result: None,
+        run(lambda: self.client.set_volume(percent), lambda _result: None,
             lambda error: self.toasts.add_toast(Adw.Toast(title=str(error), timeout=4)))
 
     def _send(self, action: str):
@@ -1618,6 +1805,42 @@ class Window(Adw.ApplicationWindow):
         call = self.client.home if action == "home" else (lambda: self.client.action(action))
         run(call, lambda _result: None,
             lambda error: self.toasts.add_toast(Adw.Toast(title=str(error), timeout=4)))
+
+    def _remote_key(self, name: str) -> bool:
+        """One dispatcher for the keys that drive the box, shared by the Remote page
+        and the player — "every Remote key works on the player" is only true if both
+        pages run the same code.
+
+        The letters and digits below this (BOX_KEYS, VOLUME_DIGITS) are page-agnostic
+        and handled by the caller's shared branches, so this returns False for them.
+        """
+        if name == "Escape":
+            # Escape is a key on this remote, not a way out of the page: it goes to
+            # the box, which is what backs out of Kodi's own dialogs.
+            self._send("back")
+            return True
+        directions = {"Up": "up", "Down": "down", "Left": "left", "Right": "right"}
+        if name in directions:
+            direction = directions[name]
+            # In the fullscreen video window Kodi binds the arrow KEYS to
+            # StepBack/StepForward; sending the navigation *actions* bypasses that
+            # binding, so a remote that wants seeking has to say `stepback`.
+            if direction in ("left", "right") and (self.player or {}).get("fullscreen_video"):
+                self._send("stepback" if direction == "left" else "stepforward")
+            else:
+                self._send(direction)
+            return True
+        if name in ("Return", "KP_Enter"):
+            # Keyboard-like Enter: in fullscreen video it opens/activates the OSD;
+            # anywhere else it activates the focused control (measured on the maemo
+            # reference remote).
+            self._send("osd" if (self.player or {}).get("fullscreen_video") else "select")
+            return True
+        if name == "t":
+            # The manual half of the text dialog: `t` is not on the box's map.
+            self._open_text_dialog()
+            return True
+        return False
 
     # -- typing into the box's dialogs -------------------------------------
 
@@ -1717,11 +1940,31 @@ class Window(Adw.ApplicationWindow):
         self._previous_page = page if page != "now" else getattr(self, "_previous_page", "grid")
         self.stack.set_visible_child_name("now")
         self._update_now_page(self.player)
-        if self.now_play.get_sensitive():
-            self.now_play.grab_focus()
+        play = self.now_buttons["play"]
+        if play.get_sensitive():
+            play.grab_focus()
         else:
             self.now_button.grab_focus()
         self._tick()
+
+    def _show_grid(self):
+        """Back to the browse surface, with its folder, selection and scroll intact."""
+        self.stack.set_visible_child_name("grid")
+        self._focus_content()
+
+    def _cycle_page(self) -> bool:
+        """`\\` walks browse → Remote → player → browse. Pages that are not a surface
+        (settings, notice, loading) are absent from PAGE_CYCLE, so it is inert there."""
+        target = PAGE_CYCLE.get(self.stack.get_visible_child_name())
+        if target is None:
+            return False
+        if target == "remote":
+            self._show_remote()
+        elif target == "now":
+            self._show_now()
+        else:
+            self._show_grid()
+        return True
 
     def _leave_now(self) -> bool:
         if self.stack.get_visible_child_name() != "now":
@@ -1731,59 +1974,127 @@ class Window(Adw.ApplicationWindow):
             self._focus_content()
         return True
 
+    def _later(self, attribute: str, fn):
+        """Restart a one-shot timer, so a drag commits once, when it stops moving."""
+        old = getattr(self, attribute, None)
+        if old:
+            GLib.source_remove(old)
+
+        def fire():
+            setattr(self, attribute, None)
+            fn()
+            return False
+
+        setattr(self, attribute, GLib.timeout_add(DRAG_DEBOUNCE_MS, fire))
+
+    def _seek_failed(self, error):
+        self.toasts.add_toast(Adw.Toast(title=str(error), timeout=5))
+
     def _seek_by(self, delta: int):
-        if not self.player or not self.player["total_seconds"]:
+        if not self.player:
             return
-        target = max(0, min(self.player["total_seconds"],
-                            self.player["elapsed_seconds"] + delta))
+        total = self.player["total_seconds"]
+        if not total:
+            # No duration — a live stream. Only Kodi's own step moves, and that is
+            # what the Remote sends; an absolute seek has nowhere to land.
+            self._send("stepback" if delta < 0 else "stepforward")
+            return
+        target = max(0, min(total, self.player["elapsed_seconds"] + delta))
         playerid = self.player["playerid"]
         run(lambda: self.client.seek(playerid, target), lambda _r: self._tick(),
-            lambda error: self.toasts.add_toast(Adw.Toast(title=str(error), timeout=5)))
+            self._seek_failed)
 
     def _on_seek(self, _scale, _scroll, value):
+        """A drag, a click on the trough, or a wheel: preview, then commit once.
+
+        Sending a seek per `change-value` is a round trip per pixel, and the 1 Hz poll
+        would then drag the handle back under the finger — so the target is held in
+        `_seek_target` until the drag stops, and `_update_now_page` leaves the bar alone
+        while it is set.
+        """
         if not self.player or not self.player["total_seconds"]:
             return True
-        playerid = self.player["playerid"]
-        target = max(0, min(self.player["total_seconds"], int(value)))
-        run(lambda: self.client.seek(playerid, target), lambda _r: self._tick(),
-            lambda error: self.toasts.add_toast(Adw.Toast(title=str(error), timeout=5)))
+        total = self.player["total_seconds"]
+        self._seek_target = max(0, min(total, int(value)))
+        self.now_elapsed.set_label(kodi.clock(self._seek_target))
+        self._later("_seek_timer", self._commit_seek)
         return True
 
+    def _commit_seek(self):
+        target, self._seek_target = self._seek_target, None
+        if target is None or not self.player:
+            return
+        playerid = self.player["playerid"]
+        run(lambda: self.client.seek(playerid, target), lambda _r: self._tick(),
+            self._seek_failed)
+
+    def _on_volume(self, _scale, _scroll, value):
+        """The volume slider, same shape as the seek bar: one call when it settles."""
+        self._later("_volume_timer", lambda: self._set_volume(int(value)))
+        return True
+
+    def _player_goto(self, to: str):
+        """Previous / next inside the box's own playlist."""
+        if not self.player:
+            return
+        playerid = self.player["playerid"]
+        run(lambda: self.client.player_goto(playerid, to), lambda _r: self._tick(),
+            self._seek_failed)
+
     def _update_now_page(self, state: dict | None):
+        for button in self.now_buttons.values():
+            button.set_sensitive(state is not None)
+        self.now_volume.set_sensitive(bool(state) and state.get("volume") is not None)
+
         if not state:
             self.now_title.set_label("Nothing playing")
             self.now_subtitle.set_label("")
-            self.now_time.set_label("")
+            self.now_plot.set_label("")
+            self.now_plot.set_visible(False)
+            self.now_elapsed.set_label("0:00")
+            self.now_total.set_label("0:00")
             self.now_scale.set_range(0, 1)
             self.now_scale.set_value(0)
             self.now_scale.set_sensitive(False)
-            self.now_play.set_icon_name("media-playback-start-symbolic")
-            for button in (self.now_back, self.now_play, self.now_stop, self.now_fwd):
-                button.set_sensitive(False)
+            self.now_buttons["play"].set_icon_name("media-playback-start-symbolic")
             if self._now_art:
                 self._now_art = ""
                 self._clear_media(self.now_media)
             return
 
         self.now_title.set_label(state["title"])
-        transport = "playing" if state["speed"] else "paused"
+        chip = [part for part in (state.get("year"),
+                                  "playing" if state["speed"] else "paused",
+                                  f'{state["percentage"]:.0f}%') if part]
+        self.now_subtitle.set_label(" \u00b7 ".join(chip))
+        plot = state.get("plot") or ""
+        self.now_plot.set_label(plot)
+        self.now_plot.set_visible(bool(plot))
+        self.now_buttons["play"].set_icon_name("media-playback-pause-symbolic" if state["speed"]
+                                               else "media-playback-start-symbolic")
+
+        # A pending drag owns the handle and the elapsed label until it commits.
         total = state["total_seconds"]
-        self.now_subtitle.set_label(f"{transport} · {state['percentage']:.0f}%")
-        if total > 0 and state["elapsed_seconds"] <= total:
-            self.now_time.set_label(f'{state["time"]} / {state["total"]}')
-            self.now_scale.set_range(0, total)
-            self.now_scale.set_value(max(0, min(state["elapsed_seconds"], total)))
-            self.now_scale.set_sensitive(True)
-        else:
-            # Some plugin streams report a position with no duration at all.
-            self.now_time.set_label(state["time"])
-            self.now_scale.set_range(0, 1)
-            self.now_scale.set_value(state["percentage"] / 100.0)
-            self.now_scale.set_sensitive(False)
-        for button in (self.now_back, self.now_play, self.now_stop, self.now_fwd):
-            button.set_sensitive(True)
-        self.now_play.set_icon_name("media-playback-pause-symbolic" if state["speed"]
-                                    else "media-playback-start-symbolic")
+        if self._seek_target is None:
+            if total > 0 and state["elapsed_seconds"] <= total:
+                self.now_scale.set_range(0, total)
+                self.now_scale.set_value(max(0, min(state["elapsed_seconds"], total)))
+                self.now_elapsed.set_label(state["time"])
+                self.now_total.set_label(state["total"])
+                self.now_scale.set_sensitive(True)
+            else:
+                # Some plugin streams report a position with no duration at all.
+                self.now_scale.set_range(0, 1)
+                self.now_scale.set_value(state["percentage"] / 100.0)
+                self.now_elapsed.set_label(state["time"])
+                self.now_total.set_label("")
+                self.now_scale.set_sensitive(False)
+
+        if state.get("volume") is not None and self._volume_timer is None:
+            self.now_volume.set_value(float(state["volume"]))
+            self.now_buttons["mute"].set_icon_name(
+                "audio-volume-muted-symbolic" if state.get("muted")
+                else "audio-volume-high-symbolic")
 
         art = kodi.artwork_url(state.get("art") or "", self.host) or ""
         if art != self._now_art:
@@ -1798,9 +2109,182 @@ class Window(Adw.ApplicationWindow):
         while child is not None:
             container.remove(child)
             child = container.get_first_child()
-        container.append(Gtk.Image(icon_name="media-optical-symbolic", pixel_size=96,
+        container.append(Gtk.Image(icon_name="media-optical-symbolic", pixel_size=120,
                                    hexpand=True, vexpand=True, css_classes=["placeholder-icon"],
                                    halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER))
+
+    # -- the queue (the box's own video playlist) --------------------------
+
+    def _toggle_queue(self, show: bool | None = None) -> bool:
+        """Slide the queue in or out. Shown, it re-reads the box's playlist."""
+        want = (not self.queue_pane.get_visible()) if show is None else show
+        self.queue_pane.set_visible(want)
+        self.queue_button.set_tooltip_text(
+            ("Hide" if want else "Show") + " the queue: what the box plays next (q)")
+        if want:
+            self._refresh_queue()
+        elif self._in_queue():
+            # The caret was in the pane that just slid away.
+            self._focus_page_content()
+        return want
+
+    def _refresh_queue(self):
+        if self.client is None:
+            return
+        client = self.client
+        run(client.playlist_items,
+            lambda items: self._fill_queue(items, (self.player or {}).get("position")),
+            lambda error: self.toasts.add_toast(Adw.Toast(title=str(error), timeout=4)))
+
+    def _fill_queue(self, items: list[Entry], position: int | None = None):
+        """Rebuild every row — the box is the only order there is, so nothing is
+        patched in place after a move.
+
+        The 1 Hz tick calls this too, so it does nothing at all when neither the
+        items nor the playing position changed: rebuilding once a second would fight
+        the caret and the scroll position.
+        """
+        signature = (tuple(item.file for item in items), position)
+        if signature == getattr(self, "_queue_sig", None):
+            return
+        self._queue_sig = signature
+
+        # Where the caret is now, before the rows are destroyed: an action's own
+        # target if it set one, else wherever the user was standing.
+        focus, self._queue_focus = getattr(self, "_queue_focus", None), None
+        if focus is None and self._in_queue():
+            focus = getattr(self.queue_list.get_selected_row(), "position", None)
+
+        self._queue_items = list(items)
+        child = self.queue_list.get_first_child()
+        while child is not None:
+            self.queue_list.remove(child)
+            child = self.queue_list.get_first_child()
+        self.queue_scroll.set_visible(bool(items))
+        self.queue_empty.set_visible(not items)
+        self.queue_title.set_label("Queue" if not items else f"Queue \u00b7 {len(items)}")
+        for index, item in enumerate(items):
+            self.queue_list.append(self._queue_row(index, item, position == index))
+
+        if items and focus is not None:
+            row = self.queue_list.get_row_at_index(max(0, min(len(items) - 1, focus)))
+            if row is not None:
+                self.queue_list.select_row(row)
+                GLib.idle_add(lambda: (row.grab_focus(), False)[1])
+
+    def _queue_row(self, index: int, item: Entry, playing: bool) -> Gtk.ListBoxRow:
+        row = Gtk.ListBoxRow(css_classes=["queue-row"] + (["playing"] if playing else []))
+        # The row's own buttons act on the position the BOX reported, not on an index
+        # the app is holding: the playlist can move under it.
+        row.position = index
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4,
+                      margin_top=2, margin_bottom=2, margin_start=8, margin_end=4)
+        box.append(Gtk.Label(label=f"{index + 1}", width_chars=2, xalign=1.0,
+                             css_classes=["queue-num"]))
+        if playing:
+            box.append(Gtk.Image(icon_name="media-playback-start-symbolic", pixel_size=14))
+        box.append(Gtk.Label(label=item.heading, xalign=0.0, hexpand=True,
+                             ellipsize=Pango.EllipsizeMode.END, max_width_chars=24,
+                             tooltip_text=item.heading))
+        for icon, tooltip, action in (("go-up-symbolic", "Move up", "up"),
+                                      ("go-down-symbolic", "Move down", "down"),
+                                      ("media-playback-start-symbolic", "Play now", "play"),
+                                      ("list-remove-symbolic", "Remove", "remove")):
+            button = Gtk.Button(icon_name=icon, tooltip_text=tooltip,
+                                css_classes=["flat"], width_request=26)
+            button.connect("clicked",
+                           lambda _b, a=action, p=index: self._queue_action(a, p))
+            box.append(button)
+        row.set_child(box)
+        return row
+
+    def _queue_action(self, action: str, position: int):
+        """One `Playlist.*` call, then a re-read, so the panel never guesses."""
+        if self.client is None:
+            return
+        client = self.client
+        count = len(self._queue_items)
+        if action == "up":
+            if position <= 0:
+                return
+            call = lambda: client.playlist_swap(position, position - 1)
+        elif action == "down":
+            if position >= count - 1:
+                return
+            call = lambda: client.playlist_swap(position, position + 1)
+        elif action == "remove":
+            call = lambda: client.playlist_remove(position)
+        elif action == "play":
+            call = lambda: client.playlist_open(position)
+        else:
+            return
+        # Where the caret should land once the list is re-read: a moved item follows
+        # its neighbour, a removed one leaves the caret where it was.
+        self._queue_focus = {"up": position - 1, "down": position + 1}.get(action, position)
+
+        def done(_result):
+            if action == "play":
+                self._tick()
+            self._refresh_queue()
+
+        run(call, done, self._seek_failed)
+
+    def _clear_queue(self):
+        if self.client is None:
+            return
+        run(self.client.playlist_clear, lambda _r: self._refresh_queue(), self._seek_failed)
+
+    def _on_queue_activated(self, _listbox, row):
+        self._queue_action("play", getattr(row, "position", 0))
+
+    def _add_to_queue(self, payload):
+        """Append to the box's video playlist — the next thing it plays."""
+        if isinstance(payload, dict):
+            if payload.get("kind") != "media":
+                return
+            path, title = payload.get("path"), payload.get("title")
+        elif isinstance(payload, Addon) or payload.is_folder:
+            return
+        else:
+            path, title = payload.file, payload.heading
+        if not path:
+            return
+
+        def done(_result):
+            self.toasts.add_toast(Adw.Toast(title=f"Queued {title}", timeout=3))
+            if self.queue_pane.get_visible():
+                self._refresh_queue()
+
+        run(lambda: self.client.playlist_add(path), done, self._seek_failed)
+
+    def _in_queue(self) -> bool:
+        widget = self.get_focus()
+        while widget is not None:
+            if widget is self.queue_list:
+                return True
+            widget = widget.get_parent()
+        return False
+
+    def _queue_key(self, name: str, state) -> bool:
+        """The keys that belong to the queue panel while the caret is in it."""
+        if name == "Escape":
+            self._focus_page_content()
+            return True
+        row = self.queue_list.get_selected_row()
+        position = getattr(row, "position", None)
+        if position is None:
+            return False
+        if name in ("Return", "KP_Enter"):
+            self._queue_action("play", position)
+            return True
+        if name == "Delete":
+            self._queue_action("remove", position)
+            return True
+        if state & Gdk.ModifierType.SHIFT_MASK and name in ("Up", "Down"):
+            self._queue_action("up" if name == "Up" else "down", position)
+            return True
+        # Up and Down belong to the ListBox itself.
+        return False
 
     # -- notices and filtering ---------------------------------------------
 
@@ -1853,54 +2337,39 @@ class Window(Adw.ApplicationWindow):
             self._send("stepback" if name == "comma" else "stepforward")
             return True
 
-        # `\` is the mode switch: browsing ↔ Remote, in the same window and at the same
-        # place in it — the stack keeps the browse page alive, so its folder trail,
-        # selection and scroll are exactly where they were. `_show_remote()` already
-        # does the remembering (it is what `r` calls), so there is one code path.
-        if name == "backslash" and not in_text and page in ("grid", "now", "remote"):
-            self._show_remote()
+        # `\` walks the three surfaces — browse → Remote → player → browse — in the same
+        # window and at the same place in it: the stack keeps the browse page alive, so
+        # its folder trail, selection and scroll are exactly where they were.
+        if name == "backslash" and not in_text and self._cycle_page():
             return True
+
+        # The queue panel: `q` anywhere it can be seen, and the panel's own keys while
+        # the caret is in it, before any browse binding can read them.
+        if name == "q" and not in_text and page in ("grid", "now"):
+            self._toggle_queue()
+            return True
+        if not in_text and self._in_queue():
+            if self._queue_key(name, state):
+                return True
+            if name in ("Up", "Down"):
+                return False        # the ListBox moves the caret
 
         if name == "question" and not in_text:
             self._show_help()
             return True
 
         if self.stack.get_visible_child_name() == "remote":
-            if name == "Escape":
-                # Escape is a key on this remote, not a way out of the page: it goes
-                # to the box (which is what backs out of Kodi's own dialogs). Use the
-                # header button or `r` to leave the remote.
-                self._send("back")
-                return True
-            directions = {"Up": "up", "Down": "down", "Left": "left", "Right": "right"}
-            if name in directions:
-                direction = directions[name]
-                # In the fullscreen video window Kodi binds the arrow KEYS to
-                # StepBack/StepForward; sending the navigation *actions* bypasses
-                # that binding, so a remote that wants seeking has to say `stepback`.
-                if direction in ("left", "right") and (self.player or {}).get("fullscreen_video"):
-                    self._send("stepback" if direction == "left" else "stepforward")
-                else:
-                    self._send(direction)
-                return True
-            if name in ("Return", "KP_Enter"):
-                # Keyboard-like Enter: in fullscreen video it opens/activates the
-                # OSD; anywhere else it activates the focused control. (Measured
-                # behaviour of the maemo reference remote.)
-                if (self.player or {}).get("fullscreen_video"):
-                    self._send("osd")
-                else:
-                    self._send("select")
-                return True
-            if name == "t":
-                # The manual half of the text dialog. `t` is not on the box's map.
-                self._open_text_dialog()
+            if self._remote_key(name):
                 return True
         if self.stack.get_visible_child_name() == "now":
+            # Leaving is Escape/Backspace everywhere in this app; the arrows are the
+            # player's own — absolute ±10 s, so the bar, the label and the box agree.
             if name in ("Escape", "BackSpace"):
                 return self._leave_now()
             if name in ("Left", "Right"):
                 self._seek_by(-10 if name == "Left" else 10)
+                return True
+            if self._remote_key(name):
                 return True
         # Backspace climbs the add-on tree on every browse page,
         # including the "loading" one: a folder that is still coming back must not
@@ -2024,13 +2493,14 @@ class Window(Adw.ApplicationWindow):
         # surface has Enter/Backspace for its own tree and no business touching the
         # box's home screen. (`i`/`c`/`o`/`f`/`m`/`x` are still page-agnostic — see the
         # openspec change if that ever bites.)
-        if name == BOX_HOME_KEY and not in_text and page == "remote":
+        if name == BOX_HOME_KEY and not in_text and page in ("remote", "now"):
             self._send("home")
             return True
         if name == "v" and not in_text and self.stack.get_visible_child_name() == "grid":
             self._toggle_view()
             return True
-        if name == "n" and not in_text and self.stack.get_visible_child_name() == "grid":
+        if name == "n" and not in_text and \
+                self.stack.get_visible_child_name() in ("grid", "remote"):
             self._show_now()
             return True
         if name == "r" and not in_text and \
@@ -2103,6 +2573,13 @@ class Window(Adw.ApplicationWindow):
 
     def _focus_content(self):
         self._select_index(self._selected_index() or 0)
+
+    def _focus_page_content(self):
+        """Put the caret back where the visible page keeps it."""
+        if self.stack.get_visible_child_name() == "grid":
+            self._focus_content()
+        else:
+            self.now_buttons["play"].grab_focus()
 
     def _menu_for_selection(self):
         """Open the context menu for the selected entry, anchored to its widget."""

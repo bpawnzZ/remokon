@@ -40,8 +40,13 @@ Named after リモコン (*rimokon*), the Japanese word for a remote control.
   filtering, and four view modes (posters, compact, wide, list).
 - **Favourites** for the places you keep going back to, right in the sidebar.
 - **A real remote** — d-pad, back/home/info/menu, fullscreen, volume, mute, steps.
-- **Two modes, one window.** `\` swaps browsing and the remote, and the browser comes
-  back exactly where you left it: same folder, same selection, same scroll.
+- **A player you can drive.** A Now playing page with the artwork, the plot, a bar you can
+  drag, ±10 s and ±60 s, previous/next in the queue, volume and mute — and every key the
+  remote has works there too.
+- **A queue.** Send anything to *play next* from the item menu, then work the list in a
+  panel on the right: play an item now, move it, drop it, clear it.
+- **Three surfaces, one window.** `\` walks browsing → remote → the player → back, and the
+  browser returns exactly where you left it: same folder, same selection, same scroll.
 - **Type with your keyboard.** When Kodi opens its on-screen keyboard, Remokon pops a
   text box that types into it — and `t` opens one by hand.
 - **Space pauses, `,`/`.` seek, from anywhere** — no need to leave the grid.
@@ -102,7 +107,8 @@ live in the same file, so one copy is the whole state.
 | `/` | filter this list (`Esc` clears) |
 | `v` · `Ctrl +` `Ctrl -` | change view · bigger / smaller tiles |
 | `s` · `,` `.` | stop · seek back / forward while a video plays |
-| `c` | menu for the selection (also right-click) |
+| `c` | menu for the selection: play, add to queue, ★ Favourites (also right-click) |
+| `q` | the queue panel: what the box plays next |
 | `Tab` | jump between the sidebar and the grid |
 
 **Remote**
@@ -116,11 +122,23 @@ live in the same file, so one copy is the whole state.
 | `PgUp` `PgDn` | big step back / forward |
 | `t` | type into the box's keyboard dialog |
 
+**Now playing**
+
+| Key | |
+|---|---|
+| `←` `→` | seek 10 seconds back / forward |
+| `PgUp` `PgDn` | a minute back / forward (the −60 s and +60 s buttons) |
+| `Space` · `Esc` | play / pause · back to browsing |
+| `i` `o` `c` `f` `m` `x` `h` | the same box keys as on the remote |
+
+Drag the bar to seek anywhere; the drag commits one seek when you let go.
+
 **Everywhere**
 
 | Key | |
 |---|---|
-| `\` | browse ⇄ remote, same window, same place |
+| `\` | browse → remote → now playing → browse |
+| `q` | show / hide the queue panel |
 | `Ctrl+B` | hide / show the sidebar |
 | `Space` | play / pause |
 | `x` | stop |
@@ -130,8 +148,9 @@ live in the same file, so one copy is the whole state.
 ## How it talks to Kodi
 
 Plain [JSON-RPC over HTTP](https://kodi.wiki/view/JSON-RPC_API) — `Files.GetDirectory`
-for the tree, `Player.*` for playback, `Input.*` for the remote. No add-on, no plugin,
-nothing installed on the box, and the password never leaves your machine.
+for the tree, `Player.*` for playback, `Playlist.*` for the queue, `Input.*` for the
+remote. No add-on, no plugin, nothing installed on the box, and the password never leaves
+your machine. The queue is Kodi's own video playlist, so it survives closing the app.
 
 ## Development
 
@@ -139,8 +158,8 @@ nothing installed on the box, and the password never leaves your machine.
 ./run.sh                                       # run from the tree
 ./build.sh                                     # single-file build in dist/
 
-/usr/bin/python3 test_kodi.py                  # protocol + config, no display needed
-xvfb-run -a /usr/bin/python3 test_ui.py        # the window, needs a display
+/usr/bin/python3 tests/test_kodi.py            # protocol + config, no display needed
+EGL_PLATFORM=x11 xvfb-run -a /usr/bin/python3 tests/test_ui.py   # the window
 ```
 
 The window tests drive a real GTK window against a fake Kodi, so they need X or Xvfb;

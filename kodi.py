@@ -51,8 +51,16 @@ ADDON_PROPERTIES = ["name", "version", "enabled", "summary", "description",
 # `id` is refused by Player.GetItem (-32602) and never volunteered by it, so a
 # player item is identified by `file`. Same list as the iOS client.
 PLAYER_ITEM_PROPERTIES = ["title", "artist", "album", "thumbnail", "fanart",
-                          "showtitle", "season", "episode", "runtime", "file", "art"]
-PLAYER_PROPERTIES = ["time", "totaltime", "percentage", "speed"]
+                          "showtitle", "season", "episode", "runtime", "file", "art",
+                          # The player page shows these beside the title. Both are
+                          # ordinary video-details fields; an item without them simply
+                          # omits them, and Kodi does not refuse the call.
+                          "plot", "year"]
+# `position` is the item's index in the playlist, which is how the queue panel knows
+# which row is playing without a second call.
+PLAYER_PROPERTIES = ["time", "totaltime", "percentage", "speed", "position"]
+# Kodi's video playlist. Audio is 0, video is 1; pictures and mixed are 2 and 3.
+PLAYLIST_ID = 1
 
 # Add-on types whose content Kodi exposes as a browsable virtual path.
 BROWSABLE_TYPES = {"xbmc.python.pluginsource", "xbmc.addon.video",
@@ -149,9 +157,14 @@ class Addon:
 
 
 class Entry:
-    """One line of `Files.GetDirectory` — a folder or something playable."""
+    """One line of `Files.GetDirectory` — a folder or something playable.
 
-    __slots__ = ("label", "file", "filetype", "thumbnail", "art", "runtime", "title")
+    Also what `Playlist.GetItems` returns, which is why the queue panel reuses it
+    instead of inventing a second reader for the same fields.
+    """
+
+    __slots__ = ("label", "file", "filetype", "thumbnail", "art", "runtime", "title",
+                 "plot", "year")
 
     def __init__(self, raw: dict):
         self.label = strip_kodi_markup(str(raw.get("label") or ""))
@@ -162,6 +175,8 @@ class Entry:
         self.art = art if isinstance(art, dict) else {}
         self.runtime = raw.get("runtime") or 0
         self.thumbnail = str(raw.get("thumbnail") or "")
+        self.plot = strip_kodi_markup(str(raw.get("plot") or ""))
+        self.year = str(raw.get("year") or "")
 
     @property
     def heading(self) -> str:
@@ -293,6 +308,46 @@ class KodiClient:
         self._call("Player.Seek",
                    {"playerid": playerid, "value": {"time": {"seconds": int(seconds)}}})
 
+    def player_goto(self, playerid: int, to: str) -> None:
+        """`previous` / `next` within the playlist; `to` may also be a position."""
+        self._call("Player.GoTo", {"playerid": playerid, "to": to})
+
+    def set_volume(self, percent: int) -> None:
+        self._call("Application.SetVolume", {"volume": int(percent)})
+
+    # -- the video playlist ------------------------------------------------
+
+    def playlist_items(self) -> list[Entry]:
+        raw = self._list("Playlist.GetItems",
+                         {"playlistid": PLAYLIST_ID,
+                          "properties": ["title", "file", "art", "thumbnail", "runtime"]},
+                         "items")
+        return [Entry(item) for item in raw]
+
+    def playlist_add(self, file: str) -> None:
+        self._call("Playlist.Add",
+                   {"playlistid": PLAYLIST_ID, "item": {"file": file}})
+
+    def playlist_remove(self, position: int) -> None:
+        self._call("Playlist.Remove",
+                   {"playlistid": PLAYLIST_ID, "position": int(position)})
+
+    def playlist_swap(self, first: int, second: int) -> None:
+        """Two positions, not a move: Kodi swaps them, so moving down one step is
+        swap(n, n+1) and moving up is swap(n, n-1)."""
+        self._call("Playlist.Swap",
+                   {"playlistid": PLAYLIST_ID, "position1": int(first),
+                    "position2": int(second)})
+
+    def playlist_open(self, position: int) -> None:
+        """Play that slot now — the playlist is opened AT the position, so the
+        items before it are skipped rather than dropped."""
+        self._call("Player.Open", {"item": {"playlistid": PLAYLIST_ID,
+                                            "position": int(position)}})
+
+    def playlist_clear(self) -> None:
+        self._call("Playlist.Clear", {"playlistid": PLAYLIST_ID})
+
 
 def playback_state(client: KodiClient) -> dict | None:
     """What is playing right now, or None. Two round trips, used by the 1 Hz poll."""
@@ -314,13 +369,33 @@ def playback_state(client: KodiClient) -> dict | None:
             "title": item.heading if item else "Playing",
             "file": item.file if item else "",
             "art": item.art_url if item else "",
+            "plot": item.plot if item else "",
+            "year": item.year if item else "",
             "percentage": float(props.get("percentage") or 0.0),
             "speed": int(props.get("speed") or 0),
+            "position": int(props.get("position") or 0),
+            # Filled by `volume_state()` only on the page that shows a volume row.
+            "volume": None,
+            "muted": False,
             "time": _clock(elapsed),
             "total": _clock(total),
             "elapsed_seconds": elapsed,
             "total_seconds": total,
             "fullscreen_video": bool(gui.get("fullscreen")) and window.get("id") == 12005}
+
+
+def volume_state(client: KodiClient) -> dict:
+    """`Application.GetProperties`, NOT `GUI.GetProperties`.
+
+    Measured on Kodi 21.3: `GUI.GetProperties ["volume"]` is refused with -32602 and
+    takes the whole call with it — the same failure shape as naming `filetype` in a
+    directory listing. This one is a separate call, so it is asked for only while the
+    player page is on screen.
+    """
+    result = client._call("Application.GetProperties", {"properties": ["volume", "muted"]})
+    if not isinstance(result, dict):
+        return {}
+    return {"volume": result.get("volume"), "muted": bool(result.get("muted"))}
 
 
 def current_window(client: KodiClient) -> dict:
@@ -364,6 +439,10 @@ def _clock(seconds) -> str:
     if hours:
         return f"{hours}:{minutes:02d}:{secs:02d}"
     return f"{minutes}:{secs:02d}"
+
+
+# Public alias: the player previews a seek target's label while the handle is held.
+clock = _clock
 
 
 # -- pure rules ------------------------------------------------------------

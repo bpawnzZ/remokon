@@ -27,6 +27,8 @@ from kodi import Addon, Entry, Host, KodiClient, KodiError, artwork_url, strip_k
 
 # What `Input.SendText` was asked for, in order.
 SENT: list[dict] = []
+# Every (method, params) the fake host received, so a test can pin the wire shape.
+CALLS: list[tuple] = []
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -49,6 +51,7 @@ class _Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         request = json.loads(self.rfile.read(length) or b"{}")
         method = request.get("method")
+        CALLS.append((method, request.get("params")))
         if method == "JSONRPC.Ping":
             return self._send(200, json.dumps({"jsonrpc": "2.0", "id": 1,
                                                "result": "pong"}).encode())
@@ -76,11 +79,21 @@ class _Handler(BaseHTTPRequestHandler):
             payload = {"jsonrpc": "2.0", "id": 1, "result": {
                 "fullscreen": True, "currentwindow": {"id": 12005}}}
             return self._send(200, json.dumps(payload).encode())
+        if method == "Application.GetProperties":
+            payload = {"jsonrpc": "2.0", "id": 1, "result": {
+                "volume": 55, "muted": False}}
+            return self._send(200, json.dumps(payload).encode())
         if method == "Player.GetProperties":
             payload = {"jsonrpc": "2.0", "id": 1, "result": {
-                "percentage": 42.5, "speed": 1,
+                "percentage": 42.5, "speed": 1, "position": 2,
                 "time": {"hours": 0, "minutes": 9, "seconds": 23},
                 "totaltime": {"hours": 0, "minutes": 49, "seconds": 15}}}
+            return self._send(200, json.dumps(payload).encode())
+        if method == "Playlist.GetItems":
+            payload = {"jsonrpc": "2.0", "id": 1, "result": {"items": [
+                {"label": "Queued A", "file": "/m/a.mkv", "runtime": 300},
+                {"label": "Queued B", "file": "/m/b.mkv", "runtime": 600},
+            ]}}
             return self._send(200, json.dumps(payload).encode())
         if method == "Input.SendText":
             SENT.append(request.get("params"))
@@ -363,6 +376,49 @@ def test_transport():
             raise AssertionError("an unreachable host must raise")
         except KodiError as error:
             assert "Cannot reach" in str(error), error
+    finally:
+        server.shutdown()
+
+
+def test_playlist_calls():
+    """The queue is the box's playlist, one call per button.
+
+    Positions are the whole risk here: `Playlist.Remove` takes `position`,
+    `Playlist.Swap` takes `position1`/`position2`, and a wrong key moves or deletes
+    the wrong item without complaint.
+    """
+    server = _serve()
+    port = server.server_address[1]
+    try:
+        client = KodiClient(Host("127.0.0.1", port, "kodi", "pw"))
+        items = client.playlist_items()
+        assert [item.heading for item in items] == ["Queued A", "Queued B"], items
+        assert items[0].file == "/m/a.mkv" and items[0].runtime == 300
+
+        CALLS.clear()
+        client.playlist_add("/m/c.mkv")
+        client.playlist_swap(1, 2)
+        client.playlist_remove(3)
+        client.playlist_open(2)
+        client.playlist_clear()
+        client.player_goto(1, "next")
+        client.set_volume(35)
+        assert CALLS == [
+            ("Playlist.Add", {"playlistid": 1, "item": {"file": "/m/c.mkv"}}),
+            ("Playlist.Swap", {"playlistid": 1, "position1": 1, "position2": 2}),
+            ("Playlist.Remove", {"playlistid": 1, "position": 3}),
+            ("Player.Open", {"item": {"playlistid": 1, "position": 2}}),
+            ("Playlist.Clear", {"playlistid": 1}),
+            ("Player.GoTo", {"playerid": 1, "to": "next"}),
+            ("Application.SetVolume", {"volume": 35}),
+        ], CALLS
+
+        # The state carries what the queue panel marks; volume comes from the one call
+        # Kodi 21.3 actually accepts it on.
+        state = kodi.playback_state(client)
+        assert state["position"] == 2, state
+        assert state["volume"] is None, "playback_state must not claim a volume it did not ask for"
+        assert kodi.volume_state(client) == {"volume": 55, "muted": False}
     finally:
         server.shutdown()
 

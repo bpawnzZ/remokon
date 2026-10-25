@@ -95,11 +95,20 @@ class FakeClient:
         self.rpc: list[str] = []
         # What `GUI.GetProperties` reports as the box's current window; 10000 is Home.
         self.window_id = 10000
+        # The box's video playlist, in order, plus what was asked of it.
+        self.playlist: list[str] = []
+        self.playlist_calls: list[tuple] = []
+        self.seeks: list[tuple[int, int]] = []
+        self.gotos: list[str] = []
+        self.volume: int | None = None
 
     def _call(self, method, params=None, timeout=None):
         self.rpc.append(method)
         if method == "GUI.GetProperties":
             return {"currentwindow": {"id": self.window_id, "label": "Fake"}}
+        if method == "Application.GetProperties":
+            # Kodi 21.3 refuses `volume` on GUI.GetProperties, so the player asks here.
+            return {"volume": 60, "muted": False}
         return "OK"
 
     def send_text(self, text, done=True):
@@ -107,6 +116,40 @@ class FakeClient:
 
     def stop(self, playerid):
         self.stopped.append(playerid)
+
+    def seek(self, playerid, seconds):
+        self.seeks.append((playerid, int(seconds)))
+
+    def player_goto(self, playerid, to):
+        self.gotos.append(to)
+
+    def play_pause(self, playerid):
+        return "1"
+
+    def set_volume(self, percent):
+        self.volume = int(percent)
+
+    def playlist_items(self):
+        return [kodi.Entry({"label": f"Queued {i}", "file": f}) for i, f in enumerate(self.playlist)]
+
+    def playlist_add(self, file):
+        self.playlist_calls.append(("add", file))
+        self.playlist.append(file)
+
+    def playlist_remove(self, position):
+        self.playlist_calls.append(("remove", position))
+        del self.playlist[position]
+
+    def playlist_swap(self, first, second):
+        self.playlist_calls.append(("swap", first, second))
+        self.playlist[first], self.playlist[second] = self.playlist[second], self.playlist[first]
+
+    def playlist_open(self, position):
+        self.playlist_calls.append(("open", position))
+
+    def playlist_clear(self):
+        self.playlist_calls.append(("clear",))
+        self.playlist.clear()
 
     def image(self, url):
         self.image_calls.append(url)
@@ -534,12 +577,12 @@ def test_the_item_menu_offers_favourites_in_one_click():
             buttons.append(child)
             child = child.get_next_sibling()
         labels = [b.get_child().get_label() for b in buttons]
-        assert labels == ["Play", "Favourites"], labels
+        assert labels == ["Play", "Favourites", "Add to queue"], labels
         assert isinstance(menu, Gtk.Popover) and not isinstance(menu, Gtk.PopoverMenu), \
             "the item menu is still a model menu (actions to resolve, submenus to open)"
 
         # Unsaved: an outline star offering to save.
-        favourite = buttons[1]
+        favourite = window.menu_favourite
         assert favourite.get_child().get_icon_name() == "non-starred-symbolic", \
             favourite.get_child().get_icon_name()
         assert favourite.get_tooltip_text() == "Add to Favourites", favourite.get_tooltip_text()
@@ -1370,8 +1413,10 @@ def test_ctrl_b_toggles_the_sidebar_and_z_is_unbound():
         window._show_now()
         pump(0.2)
         sent.clear()
-        assert press(window, Gdk.KEY_h) is False, "`h` acts on Now playing"
-        assert sent == [], f"`h` sent from Now playing: {sent}"
+        # The player is a remote surface too: every box key that works on the Remote
+        # works here, `h` included.
+        assert press(window, Gdk.KEY_h) is True, "`h` is not handled on the player"
+        assert sent == ["home"], f"`h` is not home on the player: {sent}"
         window._leave_now()
         pump(0.2)
 
@@ -1422,7 +1467,7 @@ def test_the_key_map_has_no_shadowed_letter():
         }
         # Letters whose effect is not an Input action.
         special = {"r": "page:remote", "n": "page:now", "v": "view", "s": "stop",
-                   "c": "menu"}
+                   "c": "menu", "q": "queue"}
 
         problems = []
         # A live player, complete enough that `n` (Now playing) and `s` both work.
@@ -1430,9 +1475,10 @@ def test_the_key_map_has_no_shadowed_letter():
                 "art": "", "speed": 1, "percentage": 0.0, "time": "0:00", "total": "0:00",
                 "elapsed_seconds": 0, "total_seconds": 0}
         for letter in "abcdefghijklmnopqrstuvwxyz":
-            # Reset: grid page, sidebar showing, nothing recorded, a live player.
+            # Reset: grid page, sidebar showing, queue shut, nothing recorded, a live player.
             window.stack.set_visible_child_name("grid")
             window.sidebar_pane.set_visible(True)
+            window.queue_pane.set_visible(False)
             window._close_menu()
             sent.clear()
             client.stopped.clear()
@@ -1452,6 +1498,8 @@ def test_the_key_map_has_no_shadowed_letter():
                 effect = sent[0] if len(sent) == 1 else f"actions:{sent}"
             elif window._menu is not None:
                 effect = "menu"
+            elif window.queue_pane.get_visible():
+                effect = "queue"
             elif window.stack.get_visible_child_name() != page_before:
                 effect = f"page:{window.stack.get_visible_child_name()}"
             elif window.sidebar_pane.get_visible() is False:
@@ -1681,8 +1729,8 @@ def test_help_lists_the_whole_key_map():
         app.close()
 
 
-def test_backslash_toggles_between_browsing_and_the_remote():
-    """`\\` is the mode switch, and it comes back to the same spot in the same folder."""
+def test_backslash_cycles_the_three_surfaces():
+    """`\\` walks browse → Remote → player → browse, and comes back to the same spot."""
     app = App()
     try:
         window = app.open(1100)
@@ -1701,21 +1749,17 @@ def test_backslash_toggles_between_browsing_and_the_remote():
         assert window.stack.get_visible_child_name() == "remote", "backslash did not open the Remote"
 
         assert press(window, Gdk.KEY_backslash) is True, "backslash did not leave the Remote"
+        assert window.stack.get_visible_child_name() == "now", \
+            f"backslash went to {window.stack.get_visible_child_name()}, not the player"
+
+        assert press(window, Gdk.KEY_backslash) is True, "backslash did not leave the player"
         assert window.stack.get_visible_child_name() == "grid", \
-            f"backslash came back to {window.stack.get_visible_child_name()}"
+            f"the cycle did not close on the browse surface: {window.stack.get_visible_child_name()}"
         assert [location.path for location in window.locations] == trail, window.locations
         assert window._selected_index() == 2, f"the selection moved: {window._selected_index()}"
-        assert client.directories == requested, "the toggle re-requested the folder"
+        assert client.directories == requested, "the cycle re-requested the folder"
 
-        # From the player it goes to the Remote and comes back to the player.
-        window._show_now()
-        pump(0.2)
-        assert press(window, Gdk.KEY_backslash) is True
-        assert window.stack.get_visible_child_name() == "remote"
-        assert press(window, Gdk.KEY_backslash) is True
-        assert window.stack.get_visible_child_name() == "now", window.stack.get_visible_child_name()
-
-        # A state, not a mode: the settings page has nothing to toggle to.
+        # A state, not a mode: the settings page has nothing to cycle to.
         window.stack.set_visible_child_name("settings")
         pump(0.1)
         assert press(window, Gdk.KEY_backslash) is False, "backslash acted on the settings page"
@@ -1824,6 +1868,286 @@ def test_a_text_field_swallows_every_shortcut():
         assert window.stack.get_visible_child_name() == "grid", "a text field changed the page"
         assert not window.search.get_text(), "a shortcut key typed into the field"
         assert client.sent_text == []
+    finally:
+        app.close()
+
+
+def buttons(widget):
+    """How many GtkButtons a widget's subtree holds."""
+    count = isinstance(widget, Gtk.Button)
+    child = widget.get_first_child()
+    while child is not None:
+        count += buttons(child)
+        child = child.get_next_sibling()
+    return count
+
+
+LIVE_STATE = {"playerid": 4, "title": "Blade Runner", "art": "", "plot": "A blade runner.",
+              "year": "1982", "percentage": 25.0, "speed": 1, "position": 0,
+              "volume": 60, "muted": False, "time": "10:00", "total": "40:00",
+              "elapsed_seconds": 600, "total_seconds": 2400, "fullscreen_video": False}
+
+
+def test_the_player_shows_the_item_and_a_full_transport():
+    """The player page: art, title, plot, a bar, and controls that drive the box."""
+    app = App()
+    try:
+        window = app.open(1100)
+        client = attach(window)
+        window._render()
+        pump(0.4)
+        window._show_now()
+        pump(0.2)
+
+        # Nothing playing: every control is dead, the bar is disabled.
+        assert set(window.now_buttons) == {"prev", "back60", "back10", "play", "stop",
+                                           "fwd10", "fwd60", "next", "mute",
+                                           "fullscreen", "info"}, sorted(window.now_buttons)
+        for name, button in window.now_buttons.items():
+            assert button.get_sensitive() is False, f"{name} is live with nothing playing"
+        assert window.now_scale.get_sensitive() is False
+
+        window.player = dict(LIVE_STATE)
+        window._update_now_page(LIVE_STATE)
+        pump(0.1)
+        assert window.now_title.get_label() == "Blade Runner"
+        assert "1982" in window.now_subtitle.get_label(), window.now_subtitle.get_label()
+        assert window.now_plot.get_label() == "A blade runner."
+        assert window.now_total.get_label() == "40:00", window.now_total.get_label()
+        assert window.now_scale.get_sensitive() is True
+        assert int(window.now_scale.get_value()) == 600, window.now_scale.get_value()
+        assert int(window.now_volume.get_value()) == 60, window.now_volume.get_value()
+        assert window.now_volume.get_sensitive() is True
+        for name, button in window.now_buttons.items():
+            assert button.get_sensitive() is True, f"{name} is dead with a player"
+
+        # The buttons reach the box: playlist walking, absolute seeks, box actions.
+        sent: list[str] = []
+        window._send = lambda action: sent.append(action)
+        window.now_buttons["next"].emit("clicked")
+        assert pump_until(lambda: client.gotos == ["next"]), client.gotos
+        window.player = dict(LIVE_STATE)
+        window.now_buttons["back60"].emit("clicked")
+        assert pump_until(lambda: client.seeks == [(4, 540)]), client.seeks
+        window.player = dict(LIVE_STATE)
+        window.now_buttons["info"].emit("clicked")
+        window.now_buttons["fullscreen"].emit("clicked")
+        assert sent == ["codecinfo", "fullscreen"], sent
+        window.player = dict(LIVE_STATE)
+        sent.clear()
+        window.now_volume.emit("change-value", Gtk.ScrollType.JUMP, 80)
+        assert pump_until(lambda: client.volume == 80), client.volume
+    finally:
+        app.close()
+
+
+def test_a_seek_drag_commits_once_and_the_poll_leaves_it_alone():
+    """A drag is one `Player.Seek` when it stops — not one per pixel — and the 1 Hz
+    tick does not yank the handle back under the finger."""
+    app = App()
+    try:
+        window = app.open(1100)
+        client = attach(window)
+        window._render()
+        pump(0.4)
+        window._show_now()
+        pump(0.2)
+        window.player = dict(LIVE_STATE)
+        window._update_now_page(LIVE_STATE)
+        pump(0.1)
+
+        for value in (700, 900, 1200):
+            window._on_seek(window.now_scale, None, value)
+        assert client.seeks == [], f"a drag seeked per change event: {client.seeks}"
+        assert window.now_elapsed.get_label() == kodi.clock(1200), window.now_elapsed.get_label()
+
+        # A poll lands mid-drag: the handle keeps the hand's position and the label
+        # keeps the preview.
+        window.now_scale.set_value(1200)
+        window.player = dict(LIVE_STATE)
+        window._update_now_page(LIVE_STATE)
+        assert int(window.now_scale.get_value()) == 1200, "the tick yanked the handle back"
+        assert window.now_elapsed.get_label() == kodi.clock(1200)
+
+        assert pump_until(lambda: client.seeks == [(4, 1200)]), client.seeks
+        pump(0.4)
+        assert client.seeks == [(4, 1200)], f"the drag sent {client.seeks}"
+        assert window._seek_target is None, "the drag never committed"
+    finally:
+        app.close()
+
+
+def test_the_player_shares_the_remotes_keys():
+    """Every box key the Remote has works on the player; the arrows seek."""
+    app = App()
+    try:
+        window = app.open(1100)
+        client = attach(window)
+        window._render()
+        pump(0.4)
+        sent: list[str] = []
+        window._send = lambda action: sent.append(action)
+        window._show_now()
+        pump(0.2)
+
+        def arm():
+            # The 1 Hz tick clears `player` from the fake's empty playback_state.
+            window.player = dict(LIVE_STATE)
+
+        arm()
+        assert press(window, Gdk.KEY_Left) is True, "Left was not handled on the player"
+        assert client.seeks == [(4, 590)], f"Left did not seek: {client.seeks}"
+        assert sent == [], f"Left reached the box as an action: {sent}"
+        arm()
+        assert press(window, Gdk.KEY_Right) is True
+        assert client.seeks[-1] == (4, 610), client.seeks
+
+        for symbol, want in ((Gdk.KEY_i, "info"), (Gdk.KEY_o, "codecinfo"),
+                             (Gdk.KEY_m, "mute"), (Gdk.KEY_f, "fullscreen"),
+                             (Gdk.KEY_x, "stop"), (Gdk.KEY_h, "home")):
+            sent.clear()
+            arm()
+            assert press(window, symbol) is True, f"{Gdk.keyval_name(symbol)} unhandled on the player"
+            assert sent == [want], f"{Gdk.keyval_name(symbol)} sent {sent}"
+
+        # Escape leaves the page; it is not another `back` for the box.
+        sent.clear()
+        arm()
+        assert press(window, Gdk.KEY_Escape) is True
+        assert window.stack.get_visible_child_name() == "grid", window.stack.get_visible_child_name()
+        assert sent == [], f"Escape reached the box from the player: {sent}"
+    finally:
+        app.close()
+
+
+def test_the_queue_is_hidden_until_asked_and_q_toggles_it():
+    """The panel starts shut and costs the box nothing until it is opened."""
+    app = App()
+    try:
+        window = app.open(1100)
+        client = attach(window)
+        client.playlist = ["a.mkv", "b.mkv"]
+        window._render()
+        pump(0.4)
+
+        assert window.queue_pane.get_visible() is False, "the queue started open"
+        assert "Playlist.GetItems" not in client.rpc
+        pump(1.3)
+        assert "Playlist.GetItems" not in client.rpc, "a shut queue polled the box"
+
+        assert press(window, Gdk.KEY_q) is True, "`q` was not handled"
+        assert window.queue_pane.get_visible() is True, "`q` did not open the queue"
+        assert pump_until(lambda: window.queue_list.get_row_at_index(1) is not None), "no rows"
+        assert window.queue_title.get_label() == "Queue \u00b7 2", window.queue_title.get_label()
+        assert buttons(window.queue_list.get_row_at_index(0)) == 4, "a row is missing its buttons"
+
+        assert press(window, Gdk.KEY_q) is True
+        assert window.queue_pane.get_visible() is False, "`q` did not close it"
+
+        window.queue_button.emit("clicked")
+        pump(0.3)
+        assert window.queue_pane.get_visible() is True, "the header button did nothing"
+
+        # The Remote keeps its keys: that page drives the box.
+        window._show_remote()
+        pump(0.2)
+        assert press(window, Gdk.KEY_q) is False, "`q` acted on the Remote"
+    finally:
+        app.close()
+
+
+def test_add_to_queue_and_work_the_list():
+    """Add to queue from the item menu, then play / move / remove / clear it."""
+    app = App()
+    try:
+        window = app.open(1100)
+        client = attach(window)
+        window.mode = "rows"
+        window._render()
+        pump(0.5)
+        window._select_index(0)
+        pump(0.1)
+
+        window._menu_for_selection()
+        pump(0.2)
+        assert getattr(window, "menu_queue", None) is not None, "the menu has no Add to queue"
+        window.menu_queue.emit("clicked")
+        assert pump_until(lambda: client.playlist == ["plugin://x/clip0.mkv"]), client.playlist
+        window._close_menu()
+        pump(0.1)
+
+        # A folder cannot be queued.
+        window.entries = [kodi.Entry({"label": "Folder", "file": "plugin://x/sub/",
+                                      "filetype": "directory"})]
+        window._render()
+        pump(0.3)
+        window._menu_for_selection()
+        pump(0.2)
+        assert getattr(window, "menu_queue", None) is None, "a folder was offered a queue slot"
+        window._close_menu()
+
+        client.playlist = ["a.mkv", "b.mkv", "c.mkv"]
+        window._toggle_queue(True)
+        assert pump_until(lambda: window.queue_list.get_row_at_index(2) is not None), "no rows"
+
+        window._queue_action("play", 1)
+        assert pump_until(lambda: ("open", 1) in client.playlist_calls), client.playlist_calls
+        window._queue_action("down", 0)
+        assert pump_until(lambda: ("swap", 0, 1) in client.playlist_calls), client.playlist_calls
+        assert client.playlist == ["b.mkv", "a.mkv", "c.mkv"], client.playlist
+        window._queue_action("remove", 2)
+        assert pump_until(lambda: client.playlist == ["b.mkv", "a.mkv"]), client.playlist
+        assert pump_until(lambda: window.queue_title.get_label() == "Queue \u00b7 2")
+
+        window._clear_queue()
+        assert pump_until(lambda: client.playlist == []), client.playlist
+        assert pump_until(lambda: window.queue_empty.get_visible() is True), "the empty state"
+        assert window.queue_list.get_row_at_index(0) is None, "rows survived the clear"
+    finally:
+        app.close()
+
+
+def test_the_queue_keys_never_reach_the_box():
+    """Enter plays now, Delete removes, Shift+arrows move, Escape gets out."""
+    app = App()
+    try:
+        window = app.open(1100)
+        client = attach(window)
+        client.playlist = ["a.mkv", "b.mkv", "c.mkv"]
+        window._render()
+        pump(0.4)
+        window._toggle_queue(True)
+        assert pump_until(lambda: window.queue_list.get_row_at_index(2) is not None), "no rows"
+
+        sent: list[str] = []
+        window._send = lambda action: sent.append(action)
+
+        def select(index):
+            row = window.queue_list.get_row_at_index(index)
+            window.queue_list.select_row(row)
+            row.grab_focus()
+            pump(0.15)
+            assert window._in_queue(), "the caret is not in the queue"
+
+        select(1)
+        assert press(window, Gdk.KEY_Return) is True, "Enter was not handled in the queue"
+        assert pump_until(lambda: ("open", 1) in client.playlist_calls), client.playlist_calls
+
+        select(0)
+        assert press(window, Gdk.KEY_Down, Gdk.ModifierType.SHIFT_MASK) is True
+        assert pump_until(lambda: ("swap", 0, 1) in client.playlist_calls), client.playlist_calls
+        assert client.playlist == ["b.mkv", "a.mkv", "c.mkv"], client.playlist
+
+        select(2)
+        assert press(window, Gdk.KEY_Delete) is True, "Delete was not handled in the queue"
+        assert pump_until(lambda: client.playlist == ["b.mkv", "a.mkv"]), client.playlist
+
+        select(0)
+        assert press(window, Gdk.KEY_Escape) is True, "Escape was not handled in the queue"
+        assert window.queue_pane.get_visible() is True, "Escape closed the panel"
+        assert not window._in_queue(), "the caret stayed in the queue"
+
+        assert sent == [], f"a queue key reached the box: {sent}"
     finally:
         app.close()
 
