@@ -370,12 +370,12 @@ def test_view_changes_keep_the_layout():
         pane = window.stack.get_width()
         window_width = window.get_width()
 
-        for mode in ("compact", "wide", "rows", "poster", "compact", "wide", "poster"):
+        for mode in ("compact", "wide", "hero", "rows", "poster", "compact", "wide", "poster"):
             window._set_mode(mode)
             pump(0.4)
             assert window.stack.get_width() == pane, (
                 f"pane changed from {pane} to {window.stack.get_width()} entering {mode}")
-            if mode == "rows":
+            if mode in ("rows", "hero"):
                 continue
             measured = cards(window)
             assert measured, f"{mode} rendered nothing"
@@ -406,6 +406,12 @@ def test_only_the_visible_view_is_built():
         pump(0.4)
         assert len(rows(window)) == ENTRY_COUNT
         assert window.flow.get_first_child() is None, "the grid was built while in list mode"
+
+        # A billboard is a list row too: same list, no grid.
+        window._set_mode("hero")
+        pump(0.4)
+        assert len(rows(window)) == ENTRY_COUNT, "the billboard view built no rows"
+        assert window.flow.get_first_child() is None, "the grid was built while in billboards"
     finally:
         app.close()
 
@@ -2431,6 +2437,44 @@ def test_the_title_rides_on_the_artwork():
         while node is not None:                            # nothing after the overlay
             assert node is frame, "the card still stacks something under the artwork"
             node = node.get_next_sibling()
+    finally:
+        app.close()
+
+
+def test_the_hero_view_is_one_billboard_per_entry():
+    """One title per screen, artwork 16:9 across the whole pane, the name set into the
+    picture — and the same list the list view uses, so the keys work."""
+    app = App()
+    try:
+        window = app.open(1200)
+        attach(window)
+        window._set_mode("hero")
+        assert pump_until(lambda: len(rows(window)) >= 5), "no billboards rendered"
+        pump(0.4)
+
+        pane = window.stack.get_width()
+        row = window.rows.get_row_at_index(0)
+        body = row.get_child()                      # the overlay the row holds
+        assert isinstance(body, Gtk.Overlay), type(body).__name__
+        art = body.get_child()                      # the full-width art box
+        assert abs(art.get_width() - pane) <= 24, (
+            f"the billboard is {art.get_width()} wide in a {pane} px pane")
+        assert art.get_height() == ui.HERO_HEIGHT[window.zoom], (
+            f"the billboard is {art.get_height()} tall, wanted "
+            f"{ui.HERO_HEIGHT[window.zoom]}")
+
+        scr = 0
+        node = body.get_first_child()
+        while node is not None:
+            if "hero-scrim" in node.get_css_classes():
+                scr += 1
+            node = node.get_next_sibling()
+        assert scr == 1, f"{scr} scrims on the billboard"
+
+        # It is the list's model, so activation opens the entry like the list view does.
+        window._select_index(1)
+        pump(0.2)
+        assert window._selected_index() == 1, "the billboard is not the list's selection"
     finally:
         app.close()
 

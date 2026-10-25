@@ -39,7 +39,15 @@ ART_SIZE = (128, 128)
 # the art box (1.5 = a 2:3 poster), the same way `dimensions` is written. FlowBox cannot size a child by its own
 # height-for-width, so the box gets explicit metrics instead of an AspectFrame.
 VIEWS = {"poster": (176, 1.5), "compact": (126, 1.5), "wide": (260, 9 / 16)}
-VIEW_ORDER = ["poster", "compact", "wide", "rows"]
+VIEW_ORDER = ["poster", "compact", "wide", "hero", "rows"]
+# Both of these are the same Gtk.ListBox: a billboard is a list row with a
+# 16:9 body, so focus, arrows, Enter, the menu and scroll restore are shared.
+LIST_MODES = ("rows", "hero")
+# Billboard artwork is fetched at most this big: a 40-film folder at full pane
+# size would be 40 x ~2 MB of texture for rows only one of which is on screen.
+HERO_ART_SIZE = (760, 428)
+# Banner height per zoom: the pane decides the width, this decides the presence.
+HERO_HEIGHT = {0: 260, 1: 340, 2: 440}
 ZOOM_SCALE = {0: 0.85, 1: 1.0, 2: 1.3}
 # The list has its own sizes, because "bigger items" has to mean something there
 # too: art height drives the row height.
@@ -147,6 +155,13 @@ listbox.browse > row:focus .browse-row { outline: 3px solid @accent_bg_color; ou
                                           border-radius: 12px; }
 .row-title { font-weight: 600; }
 .row-art { border-radius: 8px; background-color: alpha(currentColor, 0.06); }
+/* Billboards: one film across the pane, the way a TV shows it. */
+.hero-row { padding: 0; }
+.hero-scrim { background-image: linear-gradient(to top, alpha(black, 0.94),
+                                                alpha(black, 0.55) 55%,
+                                                alpha(black, 0.0));
+              padding: 110px 24px 18px 24px; }
+.hero-title { font-size: 17pt; font-weight: 800; }
 
 /* Saved places: a mark on the card, and a row that is not an add-on. */
 .fav-badge { font-size: 0.8em; min-width: 20px; min-height: 20px; border-radius: 99px;
@@ -433,6 +448,7 @@ class Window(Adw.ApplicationWindow):
         for label, handler in (("Posters", lambda: self._set_mode("poster")),
                                ("Compact", lambda: self._set_mode("compact")),
                                ("Wide thumbs", lambda: self._set_mode("wide")),
+                               ("Billboards", lambda: self._set_mode("hero")),
                                ("List", lambda: self._set_mode("rows")),
                                ("Smaller", lambda: self._set_zoom(self.zoom - 1)),
                                ("Larger", lambda: self._set_zoom(self.zoom + 1))):
@@ -609,7 +625,7 @@ class Window(Adw.ApplicationWindow):
         """
         if self.stack.get_visible_child_name() != "grid":
             return False
-        target = self.rows_scroll if self.mode == "rows" else self.cards_scroll
+        target = self.rows_scroll if self.mode in LIST_MODES else self.cards_scroll
         adjustment = target.get_vadjustment()
         step = 90 if abs(dy) <= 1 else dy * 40
         adjustment.set_value(adjustment.get_value() + dy * step)
@@ -1177,10 +1193,11 @@ class Window(Adw.ApplicationWindow):
         # Only the view that will be seen is built. Building both meant two image
         # rounds for every render (a tile and a row per entry), which is most of why
         # artwork appeared to lag behind a view change.
-        in_rows = self.mode == "rows"
+        in_rows = self.mode in LIST_MODES
         for tile in tiles:
             if in_rows:
-                self.rows.append(self._build_row(tile, gen))
+                self.rows.append(self._build_billboard(tile, gen) if self.mode == "hero"
+                                 else self._build_row(tile, gen))
                 continue
             child = Gtk.FlowBoxChild()
             card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, css_classes=["tile-card"])
@@ -1376,6 +1393,41 @@ class Window(Adw.ApplicationWindow):
         if url:
             self._apply_texture(art, url, gen, (art_w, art_h))
         self._add_context_gesture(box, tile.payload)
+        return row
+
+    def _build_billboard(self, tile: Tile, gen: int) -> Gtk.Widget:
+        """One entry across the whole pane: a 16:9 billboard with its title set into the
+        picture.
+
+        It is a list row, not a new surface — the list already owns focus, arrows, Enter,
+        the context menu and scroll restore, so only the row's body differs.
+        """
+        row = Gtk.ListBoxRow(css_classes=["browse-row", "hero-row"])
+        # A height, not an AspectFrame: inside a GtkListBoxRow an AspectFrame collapses
+        # to its child's minimum (measured 626x28 for a 16:9 request), because the row is
+        # measured with its natural height, not height-for-width. A banner height scales
+        # with the zoom keys instead, and COVER does the rest.
+        art = Gtk.Box(css_classes=["art-frame"], overflow=Gtk.Overflow.HIDDEN,
+                      height_request=HERO_HEIGHT[self.zoom], hexpand=True)
+        art.append(self._placeholder(tile, size=72))
+        overlay = Gtk.Overlay(child=art)
+        scrim = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.END,
+                        css_classes=["hero-scrim"])
+        # A Label is fine here, unlike a card: the row's width is the pane's, so the text
+        # can never set the width the way it does inside a fixed-size tile.
+        scrim.append(Gtk.Label(label=tile.title, xalign=0.0, wrap=True, lines=2,
+                               ellipsize=Pango.EllipsizeMode.END, css_classes=["hero-title"]))
+        if tile.detail:
+            scrim.append(Gtk.Label(label=tile.detail, xalign=0.0, ellipsize=3,
+                                   css_classes=["dim-label"]))
+        overlay.add_overlay(scrim)
+        row.set_child(overlay)
+        row.inner = overlay
+
+        url = kodi.artwork_url(tile.art, self.host)
+        if url:
+            self._apply_texture(art, url, gen, HERO_ART_SIZE)
+        self._add_context_gesture(overlay, tile.payload)
         return row
 
     def _on_row_activated(self, _listbox, row: Gtk.ListBoxRow):
@@ -1704,7 +1756,7 @@ class Window(Adw.ApplicationWindow):
     # user was.
 
     def _snapshot(self) -> dict:
-        scroller = self.rows_scroll if self.mode == "rows" else self.cards_scroll
+        scroller = self.rows_scroll if self.mode in LIST_MODES else self.cards_scroll
         return {"locations": list(self.locations),
                 "favourites": self.showing_favourites,
                 "index": self._selected_index(),
@@ -1737,7 +1789,7 @@ class Window(Adw.ApplicationWindow):
     def _apply_scroll(self, value: float, gen: int) -> bool:
         if gen != self._gen:
             return False
-        scroller = self.rows_scroll if self.mode == "rows" else self.cards_scroll
+        scroller = self.rows_scroll if self.mode in LIST_MODES else self.cards_scroll
         scroller.get_vadjustment().set_value(value)
         return False
 
@@ -2583,7 +2635,7 @@ class Window(Adw.ApplicationWindow):
             # focused child only looks *inside* that child, so nothing ever moved.
             direction = DIRECTIONS[name]
             before = self._selected_index()
-            if self.mode == "rows":
+            if self.mode in LIST_MODES:
                 if self.rows.child_focus(direction):
                     current = self.rows.get_focus_child()
                     if current is not None:
@@ -2729,7 +2781,7 @@ class Window(Adw.ApplicationWindow):
         index = self._selected_index()
         if index is None or not self.visible_tiles:
             return
-        if self.mode == "rows":
+        if self.mode in LIST_MODES:
             row = self.rows.get_row_at_index(index)
             anchor = row.get_child() if row is not None else None
         else:
@@ -2738,7 +2790,7 @@ class Window(Adw.ApplicationWindow):
             self._entry_menu(self.visible_tiles[index].payload, anchor)
 
     def _selected_index(self) -> int | None:
-        if self.mode == "rows":
+        if self.mode in LIST_MODES:
             return getattr(self, "_row_index", None)
         selected = self.flow.get_selected_children()
         return selected[0].get_index() if selected else None
@@ -2748,7 +2800,7 @@ class Window(Adw.ApplicationWindow):
         if count == 0:
             return False
         index = count - 1 if index < 0 else max(0, min(count - 1, index))
-        if self.mode == "rows":
+        if self.mode in LIST_MODES:
             row = self.rows.get_row_at_index(index)
             if row is None:
                 return False
