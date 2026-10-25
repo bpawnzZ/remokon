@@ -303,10 +303,21 @@ class KodiClient:
         self._call("Input.SendText", {"text": text, "done": done})
 
     def seek(self, playerid: int, seconds: float) -> None:
-        """Absolute seek. `percentage` is accepted too, but seconds survive a
-        stale duration better — the host clamps to the item itself."""
+        """Absolute seek, as a full `time` object.
+
+        Measured on Kodi 21.3: `{"time": {"seconds": 600}}` is refused with -32602 —
+        the `Time` type wants hours/minutes/seconds together, and a partial object is
+        an invalid param, not a shorthand. `{"percentage": p}` works, and a bare
+        `{"seconds": n}` works but means "jump n seconds from here", which is a
+        different thing. So the target is decomposed, and this is the only place any
+        caller has to get it right.
+        """
+        total = int(max(0, seconds))
+        hours, rest = divmod(total, 3600)
+        minutes, secs = divmod(rest, 60)
         self._call("Player.Seek",
-                   {"playerid": playerid, "value": {"time": {"seconds": int(seconds)}}})
+                   {"playerid": playerid,
+                    "value": {"time": {"hours": hours, "minutes": minutes, "seconds": secs}}})
 
     def player_goto(self, playerid: int, to: str) -> None:
         """`previous` / `next` within the playlist; `to` may also be a position."""

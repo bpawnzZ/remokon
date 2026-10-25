@@ -370,6 +370,18 @@ def test_transport():
         authed.send_text("the wire")
         assert SENT == [{"text": "the wire", "done": True}], SENT
 
+        # A seek needs the FULL time object: `{"time": {"seconds": n}}` is refused
+        # with -32602 on Kodi 21.3, which is what a slider drag reported as
+        # "Invalid params". Measured live, so it is pinned here.
+        CALLS.clear()
+        authed.seek(1, 3725)
+        assert CALLS == [("Player.Seek", {"playerid": 1, "value": {
+            "time": {"hours": 1, "minutes": 2, "seconds": 5}}})], CALLS
+        CALLS.clear()
+        authed.seek(1, 0)
+        assert CALLS == [("Player.Seek", {"playerid": 1, "value": {
+            "time": {"hours": 0, "minutes": 0, "seconds": 0}}})], CALLS
+
         dead = KodiClient(Host("127.0.0.1", 1))
         try:
             dead.ping()

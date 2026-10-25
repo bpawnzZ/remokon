@@ -1957,6 +1957,9 @@ def test_a_seek_drag_commits_once_and_the_poll_leaves_it_alone():
         pump(0.1)
 
         for value in (700, 900, 1200):
+            # Re-arm first: the 1 Hz tick lands between pumps and clears `player`
+            # from the fake's empty playback_state, and `_on_seek` is a no-op then.
+            window.player = dict(LIVE_STATE)
             window._on_seek(window.now_scale, None, value)
         assert client.seeks == [], f"a drag seeked per change event: {client.seeks}"
         assert window.now_elapsed.get_label() == kodi.clock(1200), window.now_elapsed.get_label()
@@ -1969,7 +1972,13 @@ def test_a_seek_drag_commits_once_and_the_poll_leaves_it_alone():
         assert int(window.now_scale.get_value()) == 1200, "the tick yanked the handle back"
         assert window.now_elapsed.get_label() == kodi.clock(1200)
 
-        assert pump_until(lambda: client.seeks == [(4, 1200)]), client.seeks
+        def committed():
+            # Keep a live player under the debounce: the fake reports nothing playing,
+            # so every tick would otherwise clear it before the 300 ms commit fires.
+            window.player = dict(LIVE_STATE)
+            return client.seeks == [(4, 1200)]
+
+        assert pump_until(committed), client.seeks
         pump(0.4)
         assert client.seeks == [(4, 1200)], f"the drag sent {client.seeks}"
         assert window._seek_target is None, "the drag never committed"
@@ -2148,6 +2157,46 @@ def test_the_queue_keys_never_reach_the_box():
         assert not window._in_queue(), "the caret stayed in the queue"
 
         assert sent == [], f"a queue key reached the box: {sent}"
+    finally:
+        app.close()
+
+
+def test_the_player_is_widescreen_and_fits_the_pane():
+    """Art beside the controls on a wide window, above them on a narrow one, and the
+    page never wider than the pane it was given."""
+    app = App()
+    try:
+        window = app.open(1100)
+        attach(window)
+        window._render()
+        pump(0.4)
+        window._show_now()
+        pump(0.4)
+        assert window.stack.get_visible_child_name() == "now"
+
+        seen = {}
+        for width in (1400, 1100, 780):
+            window.set_size_request(width, 780)
+            window.set_default_size(width, 780)
+            pump(0.5)
+            pane = window.stack.get_width()
+            stage = window.now_stage
+            assert stage.get_width() <= pane + 1, (
+                f"the player is {stage.get_width()} wide in a {pane} px pane at {width}")
+            assert window.now_media.get_width() <= stage.get_width() + 1, (
+                f"the art is wider than the page at {width}")
+            seen[width] = (stage.get_orientation(), window.now_media.get_width(),
+                           window.now_media.get_height())
+
+        # A wide window puts the art beside the controls; the art is a 16:10 box.
+        for width in (1400, 1100):
+            orientation, art_width, art_height = seen[width]
+            assert orientation == Gtk.Orientation.HORIZONTAL, (width, seen[width])
+            assert abs(art_width / art_height - 16 / 10) < 0.05, (width, seen[width])
+        # ... and it grows with the window instead of sitting at a fixed size.
+        assert seen[1400][1] > seen[1100][1], seen
+        # A narrow window stacks the art above the controls.
+        assert seen[780][0] == Gtk.Orientation.VERTICAL, seen
     finally:
         app.close()
 

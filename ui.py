@@ -24,7 +24,8 @@ gi.require_version("Adw", "1")
 gi.require_version("GdkPixbuf", "2.0")
 gi.require_version("Pango", "1.0")
 
-from gi.repository import Adw, Gdk, GdkPixbuf, Gio, GLib, Graphene, Gtk, Pango  # noqa: E402
+from gi.repository import (Adw, Gdk, GdkPixbuf, Gio, GLib, GObject, Graphene,  # noqa: E402
+                           Gtk, Pango)
 
 import kodi  # noqa: E402
 from kodi import Addon, Entry, Host, KodiClient, KodiError  # noqa: E402
@@ -43,14 +44,14 @@ ZOOM_SCALE = {0: 0.85, 1: 1.0, 2: 1.3}
 # The list has its own sizes, because "bigger items" has to mean something there
 # too: art height drives the row height.
 ROW_ZOOM = {0: (30, 42), 1: (40, 56), 2: (58, 82)}
-NOW_ART_SIZE = (560, 340)
+NOW_ART_SIZE = (900, 560)
 # `\` walks the three surfaces in this order and wraps: one key, three places to be.
 # Pages absent from the map (settings, notice, loading) make the key inert there.
 PAGE_CYCLE = {"grid": "remote", "remote": "now", "now": "grid"}
 # A drag on the seek bar or the volume slider commits once it stops moving, so a
 # drag is one JSON-RPC call instead of one per pixel.
 DRAG_DEBOUNCE_MS = 300
-QUEUE_WIDTH = 300
+QUEUE_WIDTH = 180
 
 # One place for the two things GTK cannot infer: the focus ring (the app is
 # keyboard first, so the selection must be impossible to lose) and the bar's
@@ -410,13 +411,12 @@ class Window(Adw.ApplicationWindow):
                                         tooltip_text="Remote (r)")
         self.remote_button.connect("clicked", lambda *_: self._show_remote())
         header.pack_start(self.remote_button)
-        # The queue rides beside the Remote: `media-playlist-consecutive-symbolic` is
-        # the playlist glyph Adwaita ships (there is no plain `media-playlist`), and a
-        # mistyped icon name draws nothing at all while staying clickable.
+        # `media-playlist-consecutive-symbolic` is the playlist glyph Adwaita ships
+        # (there is no plain `media-playlist`), and a mistyped icon name draws nothing
+        # at all while staying clickable.
         self.queue_button = Gtk.Button(icon_name="media-playlist-consecutive-symbolic",
                                        tooltip_text="Queue: what the box plays next (q)")
         self.queue_button.connect("clicked", lambda *_: self._toggle_queue())
-        header.pack_start(self.queue_button)
 
         # Settings is the host form (the first screen when there is no host) and help is
         # the only place the shortcut map is written down. Both sit at the end: neither
@@ -424,6 +424,8 @@ class Window(Adw.ApplicationWindow):
         self.settings_button = Gtk.Button(icon_name="emblem-system-symbolic",
                                           tooltip_text="Settings: Kodi host")
         self.settings_button.connect("clicked", lambda *_: self._toggle_settings())
+        # The queue lives with the window chrome, not with the browsing controls.
+        header.pack_end(self.queue_button)
         header.pack_end(self.settings_button)
         self.help_button = Gtk.Button(icon_name="help-about-symbolic",
                                       tooltip_text="Keyboard shortcuts (?)")
@@ -596,33 +598,47 @@ class Window(Adw.ApplicationWindow):
         return self.view_stack
 
     def _build_now_page(self) -> Gtk.Widget:
-        """The full player: art, metadata, a draggable seek bar and the transport.
+        """The player: art beside the controls on a wide window, above them on a
+        narrow one, filling whatever width the pane gives it.
 
         It reads the same 1 Hz snapshot as the bar, so the two can never disagree
-        about what is playing."""
+        about what is playing.
+        """
 
-        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,
-                       margin_top=18, margin_bottom=18, margin_start=18, margin_end=18,
-                       halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER)
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0,
+                       css_classes=["np-stage"],
+                       margin_top=16, margin_bottom=16, margin_start=16, margin_end=16,
+                       hexpand=True, vexpand=True)
 
+        self.now_stage = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=22,
+                                 hexpand=True, vexpand=True)
+
+        # The art is the flexible half: an AspectFrame keeps it a 16:10 rectangle
+        # whatever the window does, and the Gtk.Picture inside (CONTAIN) letterboxes
+        # the poster in it. Fixed 240 x 160 before, which is what made the page a
+        # 604 px poster that had to scroll.
+        self.now_art_frame = Gtk.AspectFrame(ratio=16 / 10, obey_child=False,
+                                             hexpand=True, vexpand=True)
         self.now_media = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,
-                                 width_request=NOW_ART_SIZE[0], height_request=NOW_ART_SIZE[1],
-                                 css_classes=["np-art"], halign=Gtk.Align.CENTER)
+                                 width_request=280, height_request=150,
+                                 hexpand=True, vexpand=True,
+                                 css_classes=["np-art"])
         self.now_media.append(Gtk.Image(icon_name="media-optical-symbolic", pixel_size=120,
                                         hexpand=True, vexpand=True,
                                         css_classes=["placeholder-icon"],
                                         halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER))
 
+        column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10,
+                         hexpand=True, vexpand=True, valign=Gtk.Align.CENTER)
         self.now_title = Gtk.Label(label="Nothing playing", wrap=True, lines=2,
-                                   justify=Gtk.Justification.CENTER,
-                                   max_width_chars=40, css_classes=["np-title"])
+                                   xalign=0.0, justify=Gtk.Justification.LEFT,
+                                   css_classes=["np-title"])
         self.now_subtitle = Gtk.Label(label="", css_classes=["np-chip"], wrap=True,
-                                      halign=Gtk.Align.CENTER)
+                                      halign=Gtk.Align.START)
         # Year and plot: a library item has both, a live stream neither, so the line
         # simply stays empty when the box reports nothing.
-        self.now_plot = Gtk.Label(label="", wrap=True, lines=3,
-                                  justify=Gtk.Justification.CENTER, max_width_chars=64,
-                                  css_classes=["np-plot"])
+        self.now_plot = Gtk.Label(label="", wrap=True, lines=3, xalign=0.0,
+                                  justify=Gtk.Justification.LEFT, css_classes=["np-plot"])
 
         self.now_elapsed = Gtk.Label(label="0:00", width_chars=7, xalign=1.0,
                                      css_classes=["np-time"])
@@ -634,8 +650,7 @@ class Window(Adw.ApplicationWindow):
         self.now_scale.set_draw_value(False)
         self.now_scale.set_sensitive(False)
         self.now_scale.connect("change-value", self._on_seek)
-        seek_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10,
-                           width_request=NOW_ART_SIZE[0])
+        seek_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10, hexpand=True)
         seek_row.append(self.now_elapsed)
         seek_row.append(self.now_scale)
         seek_row.append(self.now_total)
@@ -676,14 +691,14 @@ class Window(Adw.ApplicationWindow):
         button(transport, "next", "Next item in the queue",
                lambda: self._player_goto("next"), icon="media-skip-forward-symbolic")
 
-        # Volume and the box key that belongs beside it. `GUI.GetProperties` already
-        # answers `volume`/`muted` in the poll, so this row costs no extra call.
+        # Volume and the box key that belongs beside it. `Application.GetProperties`
+        # answers `volume`/`muted` only on this page, so the row costs nothing elsewhere.
         utilities = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
                             halign=Gtk.Align.CENTER)
         button(utilities, "mute", "Mute (m)", lambda: self._send("mute"),
                icon="audio-volume-high-symbolic")
         self.now_volume = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 1)
-        self.now_volume.set_size_request(200, -1)
+        self.now_volume.set_size_request(160, -1)
         self.now_volume.set_draw_value(False)
         self.now_volume.add_css_class("np-scale")
         self.now_volume.set_sensitive(False)
@@ -694,23 +709,36 @@ class Window(Adw.ApplicationWindow):
         button(utilities, "info", "Player process info (o)",
                lambda: self._send("codecinfo"), icon="dialog-information-symbolic")
 
-        stage = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
-                        css_classes=["np-stage"], halign=Gtk.Align.CENTER)
-        for widget in (self.now_media, self.now_title, self.now_subtitle, self.now_plot,
+        for widget in (self.now_title, self.now_subtitle, self.now_plot,
+                       Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL),
                        seek_row, transport, utilities):
-            stage.append(widget)
-        stage.append(Gtk.Label(
+            column.append(widget)
+        column.append(Gtk.Label(
             label="\u2190 \u2192 seek 10 s  \u00b7  PgUp / PgDn one minute  \u00b7  "
                   "Space play / pause  \u00b7  \\ cycles the pages",
-            css_classes=["dim-label"], halign=Gtk.Align.CENTER))
-        page.append(stage)
+            css_classes=["dim-label"], halign=Gtk.Align.CENTER, wrap=True))
+
+        self.now_art_frame.set_child(self.now_media)
+        self.now_stage.append(self.now_art_frame)
+        self.now_stage.append(column)
+        page.append(self.now_stage)
 
         self._now_art = ""
-        # Scrolled like the Remote page: on a small window the stage is taller than the
-        # pane, and a clipped player is worse than a scrollable one.
-        scroll = Gtk.ScrolledWindow()
-        scroll.set_child(page)
-        return scroll
+        # A breakpoint, not a width check in a signal handler: libadwaita flips the
+        # stage when the window actually crosses 900 px, which is also what makes the
+        # measured minimum width follow the narrow layout. (A `notify::default-width`
+        # check did not fire on a programmatic resize, so the window stayed horizontal
+        # at 780 px with the art crushed to 120.)
+        narrow = Gtk.Orientation.VERTICAL
+        breakpoint = Adw.Breakpoint(
+            condition=Adw.BreakpointCondition.parse("max-width: 900px"))
+        breakpoint.add_setter(self.now_stage, "orientation",
+                              GObject.Value(Gtk.Orientation, narrow))
+        breakpoint.add_setter(self.now_media, "height_request", GObject.Value(int, 200))
+        breakpoint.add_setter(self.now_art_frame, "ratio", GObject.Value(float, 16 / 9))
+        self.add_breakpoint(breakpoint)
+        return page
+
 
     def _build_queue_panel(self) -> Gtk.Widget:
         """The box's video playlist, docked on the right.
@@ -2177,24 +2205,30 @@ class Window(Adw.ApplicationWindow):
         # The row's own buttons act on the position the BOX reported, not on an index
         # the app is holding: the playlist can move under it.
         row.position = index
-        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4,
-                      margin_top=2, margin_bottom=2, margin_start=8, margin_end=4)
-        box.append(Gtk.Label(label=f"{index + 1}", width_chars=2, xalign=1.0,
-                             css_classes=["queue-num"]))
+        # Two lines, because the panel is only 180 px wide: a title and four buttons on
+        # one line leaves the title about twenty pixels.
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1,
+                      margin_top=3, margin_bottom=3, margin_start=8, margin_end=4)
+        heading = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        heading.append(Gtk.Label(label=f"{index + 1}", width_chars=2, xalign=1.0,
+                                 css_classes=["queue-num"]))
         if playing:
-            box.append(Gtk.Image(icon_name="media-playback-start-symbolic", pixel_size=14))
-        box.append(Gtk.Label(label=item.heading, xalign=0.0, hexpand=True,
-                             ellipsize=Pango.EllipsizeMode.END, max_width_chars=24,
-                             tooltip_text=item.heading))
+            heading.append(Gtk.Image(icon_name="media-playback-start-symbolic", pixel_size=12))
+        heading.append(Gtk.Label(label=item.heading, xalign=0.0, hexpand=True,
+                                 ellipsize=Pango.EllipsizeMode.END, max_width_chars=14,
+                                 tooltip_text=item.heading))
+        box.append(heading)
+        controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
         for icon, tooltip, action in (("go-up-symbolic", "Move up", "up"),
                                       ("go-down-symbolic", "Move down", "down"),
                                       ("media-playback-start-symbolic", "Play now", "play"),
                                       ("list-remove-symbolic", "Remove", "remove")):
             button = Gtk.Button(icon_name=icon, tooltip_text=tooltip,
-                                css_classes=["flat"], width_request=26)
+                                css_classes=["flat"], width_request=24, height_request=24)
             button.connect("clicked",
                            lambda _b, a=action, p=index: self._queue_action(a, p))
-            box.append(button)
+            controls.append(button)
+        box.append(controls)
         row.set_child(box)
         return row
 
