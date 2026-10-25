@@ -51,7 +51,7 @@ PAGE_CYCLE = {"grid": "remote", "remote": "now", "now": "grid"}
 # A drag on the seek bar or the volume slider commits once it stops moving, so a
 # drag is one JSON-RPC call instead of one per pixel.
 DRAG_DEBOUNCE_MS = 300
-QUEUE_WIDTH = 180
+QUEUE_WIDTH = 126
 
 # One place for the two things GTK cannot infer: the focus ring (the app is
 # keyboard first, so the selection must be impossible to lose) and the bar's
@@ -101,6 +101,9 @@ flowboxchild:focus { outline: 3px solid @accent_bg_color; outline-offset: -2px; 
 .queue-row { border-radius: 10px; padding: 2px 2px; }
 .queue-row.playing { background-color: alpha(@accent_bg_color, 0.20); }
 .queue-row:focus { outline: 2px solid @accent_bg_color; outline-offset: -2px; }
+/* 126 px of panel: four icon buttons at Adwaita's default padding need 144 px on
+   their own, which sets the panel's minimum width and defeats Adw.Clamp. */
+.queue-row button { min-width: 0; min-height: 0; padding: 1px 2px; }
 .queue-num { opacity: 0.55; font-feature-settings: "tnum"; font-weight: 700; }
 .queue-empty { opacity: 0.7; }
 listbox.queue > row:selected { background: none; }
@@ -473,7 +476,11 @@ class Window(Adw.ApplicationWindow):
         # the content pane on first layout.
         self.queue_pane = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
         self.queue_pane.append(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL))
-        self.queue_pane.append(self._build_queue_panel())
+        # An Adw.Clamp, because a Gtk.Widget has a MINIMUM width and no maximum: with a
+        # bare width_request the body Box happily handed the pane its 460 px natural
+        # width instead of the 126 it asked for. The clamp is the native cap.
+        self.queue_pane.append(Adw.Clamp(maximum_size=QUEUE_WIDTH, tightening_threshold=0))
+        self.queue_pane.get_last_child().set_child(self._build_queue_panel())
         self.queue_pane.set_visible(False)
 
         body = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
@@ -747,21 +754,23 @@ class Window(Adw.ApplicationWindow):
         ago, and every button is one `Playlist.*` call followed by a re-read, so the
         panel can never show an order the box does not have.
         """
-        panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, width_request=QUEUE_WIDTH)
+        panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
 
-        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4,
-                         margin_top=8, margin_bottom=6, margin_start=12, margin_end=6)
+        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2,
+                         margin_top=8, margin_bottom=6, margin_start=8, margin_end=4)
+        # Ellipsised, not natural-size: at 126 px the title is the part that gives way.
         self.queue_title = Gtk.Label(label="Queue", xalign=0.0, hexpand=True,
+                                     ellipsize=Pango.EllipsizeMode.END,
                                      css_classes=["queue-head"])
         header.append(self.queue_title)
-        self.queue_clear_button = Gtk.Button(icon_name="list-remove-all-symbolic",
-                                             tooltip_text="Clear the queue",
-                                             css_classes=["flat"])
-        self.queue_clear_button.connect("clicked", lambda *_: self._clear_queue())
-        header.append(self.queue_clear_button)
+        # Only one button up here: at 126 px a title plus two icons leaves both icons a
+        # 16 px target. Clear lives at the foot of the panel, where it has the width.
+        # A width request, because a flat icon button's minimum is just the 16 px glyph
+        # and the expanding title eats the rest; 24 keeps it a real target.
         self.queue_close_button = Gtk.Button(icon_name="window-close-symbolic",
                                              tooltip_text="Hide the queue (q)",
-                                             css_classes=["flat"])
+                                             css_classes=["flat"],
+                                             width_request=24, height_request=24)
         self.queue_close_button.connect("clicked", lambda *_: self._toggle_queue(False))
         header.append(self.queue_close_button)
         panel.append(header)
@@ -779,9 +788,16 @@ class Window(Adw.ApplicationWindow):
             label="Nothing queued yet.\n\nPress c on an item \u2014 or right-click it "
                   "\u2014 and choose Add to queue.",
             wrap=True, justify=Gtk.Justification.CENTER, css_classes=["queue-empty"],
-            margin_top=24, margin_bottom=24, margin_start=18, margin_end=18)
+            max_width_chars=18, margin_top=24, margin_bottom=24,
+            margin_start=10, margin_end=10)
         panel.append(self.queue_empty)
+        self.queue_clear_button = Gtk.Button(label="Clear", css_classes=["flat"],
+                                             margin_top=2, margin_bottom=8,
+                                             margin_start=8, margin_end=8)
+        self.queue_clear_button.connect("clicked", lambda *_: self._clear_queue())
+        panel.append(self.queue_clear_button)
         self.queue_scroll.set_visible(False)
+        self.queue_clear_button.set_visible(False)
         return panel
 
     def _build_remote_page(self) -> Gtk.Widget:
@@ -2191,6 +2207,7 @@ class Window(Adw.ApplicationWindow):
         self.queue_scroll.set_visible(bool(items))
         self.queue_empty.set_visible(not items)
         self.queue_title.set_label("Queue" if not items else f"Queue \u00b7 {len(items)}")
+        self.queue_clear_button.set_visible(bool(items))
         for index, item in enumerate(items):
             self.queue_list.append(self._queue_row(index, item, position == index))
 
@@ -2208,7 +2225,7 @@ class Window(Adw.ApplicationWindow):
         # Two lines, because the panel is only 180 px wide: a title and four buttons on
         # one line leaves the title about twenty pixels.
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1,
-                      margin_top=3, margin_bottom=3, margin_start=8, margin_end=4)
+                      margin_top=3, margin_bottom=3, margin_start=6, margin_end=2)
         heading = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         heading.append(Gtk.Label(label=f"{index + 1}", width_chars=2, xalign=1.0,
                                  css_classes=["queue-num"]))
