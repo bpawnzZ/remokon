@@ -61,20 +61,31 @@ QUEUE_WIDTH = SIDEBAR_WIDTH
 # separation from the content.
 CSS = """
 /* Cards, not bare icons: the grid is the app's face. */
-.tile-card { padding: 10px; border-radius: 16px;
-             background-color: alpha(currentColor, 0.045);
-             box-shadow: 0 1px 2px alpha(black, 0.18); }
-flowboxchild:hover .tile-card { background-color: alpha(@accent_bg_color, 0.14); }
+.tile-card { padding: 8px; border-radius: 18px;
+             background-color: alpha(currentColor, 0.075);
+             border: 1px solid alpha(currentColor, 0.10);
+             box-shadow: 0 3px 10px alpha(black, 0.30); }
+/* Hover brightens the BORDER with the accent: on a wall of dark cards a fill-only tint
+   is invisible until you are already on the card. */
+flowboxchild:hover .tile-card { background-color: alpha(@accent_bg_color, 0.20);
+                                border-color: alpha(@accent_bg_color, 0.65);
+                                box-shadow: 0 6px 18px alpha(black, 0.45); }
 .art-frame { border-radius: 12px;
               background-image: linear-gradient(180deg, alpha(@accent_bg_color, 0.13),
                                                 alpha(currentColor, 0.03)); }
+/* The title sits on the artwork, so it needs its own floor to stay readable over a
+   bright frame. */
+.tile-scrim { background-image: linear-gradient(to top, alpha(black, 0.92),
+                                                alpha(black, 0.60) 55%,
+                                                alpha(black, 0.0));
+              padding: 34px 10px 9px 10px; }
 .placeholder-icon { opacity: 0.45; }
 flowboxchild { padding: 6px; border-radius: 18px; }
 /* Selection is an outline, not a fill: a filled tile hides the artwork it
    exists to show. */
 flowboxchild:selected { background: none; }
 flowboxchild:focus { outline: 3px solid @accent_bg_color; outline-offset: -2px; }
-.tile-title { font-weight: 600; }
+.tile-title { font-weight: 700; font-size: 0.95em; }
 .dim-label { opacity: 0.65; }
 .dpad { font-weight: 700; border-radius: 12px; }
 
@@ -1295,23 +1306,30 @@ class Window(Adw.ApplicationWindow):
                                         halign=Gtk.Align.END, valign=Gtk.Align.START,
                                         margin_top=6, margin_end=6, tooltip_text="Favourite"))
 
+        # The title rides on the artwork instead of a strip under it: the picture then
+        # owns the whole card, and the scrim under the text keeps it readable over a
+        # bright frame. The card's width still comes from the art box, because an
+        # Inscription inside a fixed-width overlay cannot add to it.
+        caption = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.END,
+                          css_classes=["tile-scrim"])
+        caption.append(Gtk.Inscription(text=tile.title, nat_chars=0, min_chars=1,
+                                       min_lines=1, nat_lines=2, xalign=0.0,
+                                       wrap_mode=Pango.WrapMode.WORD_CHAR,
+                                       text_overflow=Gtk.InscriptionOverflow.ELLIPSIZE_END,
+                                       css_classes=["tile-title"]))
+        frame.add_overlay(caption)
+
         # The card fills its (equal-width) cell; the ART box above is a fixed size, so
         # a wider cell widens the card's padding, never the poster. Bounding the card
         # itself was the wrong lever (a wrapped label sets a natural width that
         # `width_request` cannot cap) and it also raised the window's minimum width.
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, width_request=width)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, width_request=width)
         box.append(frame)
-        # Gtk.Inscription, not Gtk.Label: a Label always reports a natural width from
-        # its text, and `width_request` is only a MINIMUM, so a long title widened a
-        # 126 px card to 152 px and a 176 px poster to 185 px. Inscription's natural
-        # width is its `nat_chars` (0 here), so the artwork's width decides the card
-        # and the text wraps inside it.
-        box.append(Gtk.Inscription(text=tile.title, nat_chars=0, min_chars=1,
-                                   min_lines=2, nat_lines=2, xalign=0.5,
-                                   wrap_mode=Pango.WrapMode.WORD_CHAR,
-                                   text_overflow=Gtk.InscriptionOverflow.ELLIPSIZE_END,
-                                   css_classes=["tile-title"]))
         if tile.detail:
+            # Only a secondary line (an add-on's version) stays under the picture;
+            # Gtk.Inscription, not Gtk.Label: a Label reports a natural width from its
+            # text and `width_request` is only a MINIMUM, which used to widen a 126 px
+            # card to 152 px. Inscription's natural width is `nat_chars` (0 here).
             box.append(Gtk.Inscription(text=tile.detail, nat_chars=0, min_chars=1,
                                        xalign=0.5,
                                        text_overflow=Gtk.InscriptionOverflow.ELLIPSIZE_END,
@@ -1425,7 +1443,7 @@ class Window(Adw.ApplicationWindow):
     @staticmethod
     def _swap_picture(container: Gtk.Widget, texture: Gdk.Texture):
         """Put the texture in place of the placeholder, whichever container it is."""
-        picture = Gtk.Picture(paintable=texture, content_fit=Gtk.ContentFit.CONTAIN,
+        picture = Gtk.Picture(paintable=texture, content_fit=Gtk.ContentFit.COVER,
                               can_shrink=True, hexpand=True, vexpand=True)
         if isinstance(container, Gtk.AspectFrame):
             container.set_child(picture)

@@ -2362,6 +2362,79 @@ def test_the_bottom_bar_hides_on_the_player():
         app.close()
 
 
+def test_artwork_fills_its_frame():
+    """COVER, not CONTAIN: a 16:9 still letterboxed in a 9:16 frame turns a wall of
+    posters into a patchwork of empty bars."""
+    app = App()
+    try:
+        window = app.open(1200)
+        attach(window)
+        window._render()
+        assert pump_until(lambda: pictures(window.flow) > 0), "no artwork rendered"
+        pump(0.3)
+
+        fits, count = set(), 0
+
+        def walk(widget):
+            nonlocal count
+            if isinstance(widget, Gtk.Picture):
+                count += 1
+                fits.add(widget.get_content_fit())
+            child = widget.get_first_child()
+            while child is not None:
+                walk(child)
+                child = child.get_next_sibling()
+
+        walk(window.flow)
+        assert count, "no pictures in the grid"
+        assert fits == {Gtk.ContentFit.COVER}, f"card artwork fits {fits}"
+    finally:
+        app.close()
+
+
+def test_the_title_rides_on_the_artwork():
+    """The title is drawn over the picture on a scrim, not in a strip under it."""
+    app = App()
+    try:
+        window = app.open(1200)
+        attach(window)
+        window._render()
+        assert pump_until(lambda: pictures(window.flow) > 0), "no artwork rendered"
+        pump(0.3)
+
+        child = window.flow.get_first_child()
+        inner = child.get_child().get_first_child()      # tile-card box -> tile box
+        frame = inner.get_first_child()
+        assert isinstance(frame, Gtk.Overlay), type(frame).__name__
+
+        scrims, titles_outside = [], []
+
+        def walk(widget):
+            classes = widget.get_css_classes()
+            if "tile-scrim" in classes:
+                scrims.append(widget)
+            if isinstance(widget, Gtk.Inscription) and "tile-title" in classes:
+                titles_outside.append(widget)
+            node = widget.get_first_child()
+            while node is not None:
+                walk(node)
+                node = node.get_next_sibling()
+
+        walk(frame)
+        assert len(scrims) == 1, f"{len(scrims)} scrims on the card"
+        # ... and the card's own box below the overlay carries no title of its own.
+        titles_outside.clear()
+        walk(inner)
+        assert len(titles_outside) == 1, (
+            f"{len(titles_outside)} titles in the card (the one on the scrim is it)")
+        node = inner.get_first_child()
+        while node is not None:                            # nothing after the overlay
+            assert node is frame, "the card still stacks something under the artwork"
+            node = node.get_next_sibling()
+    finally:
+        app.close()
+
+
 def main() -> int:
     tests = [value for name, value in sorted(globals().items())
              if name.startswith("test_") and callable(value)]
