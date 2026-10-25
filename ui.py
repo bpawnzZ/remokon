@@ -92,11 +92,16 @@ flowboxchild:focus { outline: 3px solid @accent_bg_color; outline-offset: -2px; 
 .np-plot { font-size: 0.95em; opacity: 0.78; }
 .np-chip { font-size: 0.85em; padding: 2px 12px; border-radius: 99px;
            background-color: alpha(currentColor, 0.14); }
-.np-play { min-width: 62px; min-height: 62px; border-radius: 99px; }
-.np-scale trough { min-height: 8px; border-radius: 99px; }
+.np-play { min-width: 58px; min-height: 58px; border-radius: 99px; }
+/* One rhythm: every transport button the same width, so the play button is the row's
+   centre and the icon-only stop is not a stub beside 69 px text buttons. */
+.np-transport button { min-width: 58px; min-height: 44px; border-radius: 10px; }
+/* A control, not a hairline: 4 px of trough read as a divider, and the page has none. */
+.np-scale trough { min-height: 10px; border-radius: 99px;
+                   background-color: alpha(currentColor, 0.18); }
+.np-scale slider { min-width: 20px; min-height: 20px; }
 .np-scale highlight { border-radius: 99px; }
 .np-time { opacity: 0.8; font-feature-settings: "tnum"; }
-.np-transport button { min-height: 38px; border-radius: 10px; }
 .now-playing { border-top: 1px solid alpha(currentColor, 0.10); }
 
 /* The queue: what comes next, docked on the right. */
@@ -452,7 +457,10 @@ class Window(Adw.ApplicationWindow):
         self.crumbs = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2,
                               margin_top=2, margin_bottom=6, margin_start=14, margin_end=14)
         self.toolbar.add_top_bar(self.crumbs)
-        self.toolbar.add_bottom_bar(self._build_now_playing())
+        # Kept as a handle: the player page carries the same transport, so the bar hides
+        # itself there rather than offering a second, differently-styled pause/stop.
+        self.now_playing_bar = self._build_now_playing()
+        self.toolbar.add_bottom_bar(self.now_playing_bar)
 
         sidebar = Gtk.ScrolledWindow(width_request=SIDEBAR_WIDTH,
                                      hscrollbar_policy=Gtk.PolicyType.NEVER)
@@ -474,6 +482,12 @@ class Window(Adw.ApplicationWindow):
         self.stack.add_named(self._build_now_page(), "now")
         self.stack.add_named(self._build_remote_page(), "remote")
         self.stack.add_named(self._build_loading_page(), "loading")
+        # One rule for every way a page changes (`\`, the gear, a back stack, a key):
+        # the bar exists for the surfaces that have no player of their own.
+        self.stack.connect(
+            "notify::visible-child-name",
+            lambda *_a: self.now_playing_bar.set_visible(
+                self.stack.get_visible_child_name() != "now"))
 
         # The sidebar and its divider hide together: hiding only the scroller leaves a
         # 1 px separator against the window edge, and the freed width is the point.
@@ -735,11 +749,10 @@ class Window(Adw.ApplicationWindow):
                lambda: self._send("codecinfo"), icon="dialog-information-symbolic")
 
         for widget in (self.now_title, self.now_subtitle, self.now_plot,
-                       Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL),
                        seek_row, transport, utilities):
             column.append(widget)
         column.append(Gtk.Label(
-            label="\u2190 \u2192 seek 10 s  \u00b7  PgUp / PgDn one minute  \u00b7  "
+            label="\u2190 \u2192 seek 10 s  \u00b7  PgUp / PgDn 60 s  \u00b7  "
                   "Space play / pause  \u00b7  \\ cycles the pages",
             css_classes=["dim-label"], halign=Gtk.Align.CENTER, wrap=True))
 

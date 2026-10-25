@@ -2239,6 +2239,120 @@ def test_the_player_is_widescreen_and_fits_the_pane():
         app.close()
 
 
+def test_the_transport_has_one_rhythm():
+    """One width for every transport button, and play is the row's centre.
+
+    Measured on a real screen: 43, 69, 69, 69, 35, 69, 70, 43 — the icon-only stop was
+    half its neighbours' width, so the blue play button read as sitting left of centre
+    and the pause/stop pair looked pinched.
+    """
+    app = App()
+    try:
+        window = app.open(1200)
+        attach(window)
+        window._render()
+        pump(0.4)
+        window._show_now()
+        pump(0.3)
+        window.player = dict(LIVE_STATE)
+        window._update_now_page(LIVE_STATE)
+        pump(0.3)
+
+        play = window.now_buttons["play"]
+        stop = window.now_buttons["stop"]
+        row = play.get_parent()
+        buttons = [b for b in window.now_buttons.values() if b.get_parent() is row]
+        assert len(buttons) == 8, f"the transport has {len(buttons)} buttons"
+        widths = {b.get_width() for b in buttons}
+        assert len(widths) == 1, f"transport widths {sorted(widths)}"
+        assert min(widths) >= 44, f"the transport is {min(widths)} px wide, too small to hit"
+
+        # Eight buttons have no middle one, so the play+stop pair is what must straddle
+        # the row's centre — that is the pair the eye reads as "the transport".
+        ok, left = play.compute_point(row, Graphene.Point().init(0, 0))
+        ok, right = stop.compute_point(row, Graphene.Point().init(0, 0))
+        pair_centre = (left.x + (right.x + stop.get_width())) / 2
+        assert abs(pair_centre - row.get_width() / 2) <= 1.5, (
+            f"play+stop centre {pair_centre} is not the row centre {row.get_width() / 2}")
+    finally:
+        app.close()
+
+
+def test_the_player_has_one_horizontal_track():
+    """The seek bar is the only horizontal line: a divider 15 px above it reads as a
+    second, clickable progress track (and was reported as one)."""
+    app = App()
+    try:
+        window = app.open(1200)
+        attach(window)
+        window._render()
+        pump(0.4)
+        window._show_now()
+        pump(0.3)
+
+        found = []
+
+        def walk(widget):
+            if isinstance(widget, Gtk.Separator):
+                found.append(type(widget).__name__)
+            child = widget.get_first_child()
+            while child is not None:
+                walk(child)
+                child = child.get_next_sibling()
+
+        walk(window.now_stage.get_parent())  # the whole page, not just the stage
+        assert not found, f"{len(found)} separator(s) on the player page"
+    finally:
+        app.close()
+
+
+def test_the_seek_bar_is_not_a_hairline():
+    """A 4 px trough read as a divider. The bar has to look like a control."""
+    app = App()
+    try:
+        window = app.open(1200)
+        attach(window)
+        window._render()
+        pump(0.4)
+        window._show_now()
+        pump(0.3)
+        window.player = dict(LIVE_STATE)
+        window._update_now_page(LIVE_STATE)
+        pump(0.3)
+        assert window.now_scale.get_height() >= 10, (
+            f"the seek bar is only {window.now_scale.get_height()} px tall")
+    finally:
+        app.close()
+
+
+def test_the_bottom_bar_hides_on_the_player():
+    """One set of transport controls: the page has them, so the footer keeps out of the
+    way — and comes back on the surfaces that do not."""
+    app = App()
+    try:
+        window = app.open(1100)
+        attach(window)
+        window._render()
+        pump(0.4)
+        window._show_now()
+        pump(0.2)
+        assert not window.now_playing_bar.get_visible(), "the bar is still there on the player"
+
+        window._show_grid()
+        pump(0.2)
+        assert window.now_playing_bar.get_visible(), "the bar did not come back on browse"
+
+        window._show_remote()
+        pump(0.2)
+        assert window.now_playing_bar.get_visible(), "the bar did not come back on the Remote"
+
+        window._show_now()
+        pump(0.2)
+        assert not window.now_playing_bar.get_visible(), "the bar came back on the player"
+    finally:
+        app.close()
+
+
 def main() -> int:
     tests = [value for name, value in sorted(globals().items())
              if name.startswith("test_") and callable(value)]
