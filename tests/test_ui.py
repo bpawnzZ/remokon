@@ -2274,6 +2274,15 @@ def test_the_transport_has_one_rhythm():
         pair_centre = (left.x + (right.x + stop.get_width())) / 2
         assert abs(pair_centre - row.get_width() / 2) <= 1.5, (
             f"play+stop centre {pair_centre} is not the row centre {row.get_width() / 2}")
+
+        # The utilities row underneath shares the transport's height, so the two read as
+        # one panel instead of a cluster of dots floating under it.
+        utilities = [window.now_buttons[name] for name in ("mute", "fullscreen", "info")]
+        assert {b.get_height() for b in utilities} == {buttons[0].get_height()}, (
+            "the utilities row does not match the transport's height: "
+            f"{[b.get_height() for b in utilities]} vs {buttons[0].get_height()}")
+        assert all(b.get_width() >= 40 for b in utilities), (
+            f"utilities widths {[b.get_width() for b in utilities]}")
     finally:
         app.close()
 

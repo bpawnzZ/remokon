@@ -92,10 +92,15 @@ flowboxchild:focus { outline: 3px solid @accent_bg_color; outline-offset: -2px; 
 .np-plot { font-size: 0.95em; opacity: 0.78; }
 .np-chip { font-size: 0.85em; padding: 2px 12px; border-radius: 99px;
            background-color: alpha(currentColor, 0.14); }
-.np-play { min-width: 58px; min-height: 58px; border-radius: 99px; }
 /* One rhythm: every transport button the same width, so the play button is the row's
    centre and the icon-only stop is not a stub beside 69 px text buttons. */
 .np-transport button { min-width: 58px; min-height: 44px; border-radius: 10px; }
+/* ... and the play button keeps the emphasis: taller, round. Two classes on purpose,
+   `.np-transport button` is more specific than `.np-play` and would flatten it. */
+.np-transport button.np-play { min-height: 58px; border-radius: 99px; }
+/* The volume/fullscreen/info row sits under the transport and shares its height, so it
+   reads as the second row of one panel instead of a floating cluster of dots. */
+.np-utilities button { min-width: 44px; min-height: 44px; border-radius: 10px; }
 /* A control, not a hairline: 4 px of trough read as a divider, and the page has none. */
 .np-scale trough { min-height: 10px; border-radius: 99px;
                    background-color: alpha(currentColor, 0.18); }
@@ -700,6 +705,9 @@ class Window(Adw.ApplicationWindow):
                    label: str | None = None, icon: str | None = None,
                    extra: tuple[str, ...] = ()) -> Gtk.Button:
             item = Gtk.Button(tooltip_text=tooltip, css_classes=list(extra))
+            # Each button keeps its own height inside the row: without this the box fills
+            # every child to the tallest, which flattens the taller play button.
+            item.set_valign(Gtk.Align.CENTER)
             if label is not None:
                 item.set_label(label)
             if icon is not None:
@@ -733,7 +741,7 @@ class Window(Adw.ApplicationWindow):
         # Volume and the box key that belongs beside it. `Application.GetProperties`
         # answers `volume`/`muted` only on this page, so the row costs nothing elsewhere.
         utilities = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
-                            halign=Gtk.Align.CENTER)
+                            halign=Gtk.Align.CENTER, css_classes=["np-utilities"])
         button(utilities, "mute", "Mute (m)", lambda: self._send("mute"),
                icon="audio-volume-high-symbolic")
         self.now_volume = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 1)
