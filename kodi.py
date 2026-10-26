@@ -58,7 +58,10 @@ PLAYER_ITEM_PROPERTIES = ["title", "artist", "album", "thumbnail", "fanart",
                           "plot", "year"]
 # `position` is the item's index in the playlist, which is how the queue panel knows
 # which row is playing without a second call.
-PLAYER_PROPERTIES = ["time", "totaltime", "percentage", "speed", "position"]
+# `playlistid` rides along for one reason: a new playlist also starts at position
+# 0, so a bare position cannot tell "the next track" from "another list".
+PLAYER_PROPERTIES = ["time", "totaltime", "percentage", "speed", "position",
+                     "playlistid"]
 # Kodi's video playlist. Audio is 0, video is 1; pictures and mixed are 2 and 3.
 PLAYLIST_ID = 1
 
@@ -396,6 +399,7 @@ def playback_state(client: KodiClient) -> dict | None:
             "percentage": float(props.get("percentage") or 0.0),
             "speed": int(props.get("speed") or 0),
             "position": int(props.get("position") or 0),
+            "playlistid": props.get("playlistid"),
             # Filled by `volume_state()` only on the page that shows a volume row.
             "volume": None,
             "muted": False,

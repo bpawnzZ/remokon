@@ -69,7 +69,7 @@ QUEUE_WIDTH = SIDEBAR_WIDTH
 # separation from the content.
 CSS = """
 /* Cards, not bare icons: the grid is the app's face. */
-.tile-card { padding: 8px; border-radius: 18px;
+.tile-card { padding: 3px; border-radius: 14px;
              background-color: alpha(currentColor, 0.075);
              border: 1px solid alpha(currentColor, 0.10);
              box-shadow: 0 3px 10px alpha(black, 0.30); }
@@ -78,7 +78,7 @@ CSS = """
 flowboxchild:hover .tile-card { background-color: alpha(@accent_bg_color, 0.20);
                                 border-color: alpha(@accent_bg_color, 0.65);
                                 box-shadow: 0 6px 18px alpha(black, 0.45); }
-.art-frame { border-radius: 12px;
+.art-frame { border-radius: 11px;
               background-image: linear-gradient(180deg, alpha(@accent_bg_color, 0.13),
                                                 alpha(currentColor, 0.03)); }
 /* The title sits on the artwork, so it needs its own floor to stay readable over a
@@ -380,6 +380,9 @@ class Window(Adw.ApplicationWindow):
 
         self._gen = 0          # bumps on every render; stale image arrivals are dropped
         self._polling = False
+        # The last (playlistid, position) the poll saw, so an advance inside one playlist
+        # can be told from a fresh one and the played item dropped from the queue.
+        self._played: tuple | None = None
         # A drag owns the seek handle until it commits: `_seek_target` is the pending
         # position and `_seek_timer` the one-shot that sends it. The volume slider
         # works the same way through `_volume_timer`.
@@ -645,7 +648,7 @@ class Window(Adw.ApplicationWindow):
                                 # column count instead raises this widget's own
                                 # minimum width (columns × card) and loops the layout.
                                 homogeneous=True,
-                                row_spacing=16, column_spacing=14,
+                                row_spacing=8, column_spacing=8,
                                 valign=Gtk.Align.START,
                                 margin_top=14, margin_bottom=28,
                                 margin_start=14, margin_end=14)
@@ -1311,13 +1314,18 @@ class Window(Adw.ApplicationWindow):
         # An explicit art box: GtkFlowBox lays children out at their natural size and
         # cannot ask a child for its height at a given width, so an AspectFrame
         # collapsed to a thin strip and made every card look squashed.
-        media = Gtk.Box(width_request=art_w, height_request=art_h,
+        # `hexpand`: the flow cell is often wider than the art (homogeneous shares the line
+        # out), and a fixed-width art box centred in it left a fat margin on both sides —
+        # the "border around the thumbs" that was too big. The art now fills the card and
+        # COVER deals with the fraction of extra width.
+        media = Gtk.Box(width_request=art_w, height_request=art_h, hexpand=True,
                         overflow=Gtk.Overflow.HIDDEN, css_classes=["art-frame"])
         media.append(self._placeholder(tile))
         # The FlowBox's cell is wider than the card whenever the pane does not divide
         # evenly (homogeneous shares the line out). An Overlay keeps the requested
         # card size and carries the favourite mark on top of the artwork.
-        frame = Gtk.Overlay(child=media, halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER)
+        frame = Gtk.Overlay(child=media, halign=Gtk.Align.FILL, valign=Gtk.Align.CENTER,
+                            hexpand=True)
         if self._is_saved(tile.payload):
             frame.add_overlay(Gtk.Label(label="★", css_classes=["fav-badge"],
                                         halign=Gtk.Align.END, valign=Gtk.Align.START,
@@ -1920,6 +1928,7 @@ class Window(Adw.ApplicationWindow):
         self._polling = False
         self.player = state
         self._watch_text_dialog(window)
+        self._prune_played(state)
         self._update_now_page(state)
         if queue is not None:
             self._fill_queue(queue, (state or {}).get("position"))
@@ -2221,6 +2230,29 @@ class Window(Adw.ApplicationWindow):
         playerid = self.player["playerid"]
         run(lambda: self.client.player_goto(playerid, to), lambda _r: self._tick(),
             self._seek_failed)
+
+    def _prune_played(self, state: dict | None):
+        """Drop what has already played from the queue.
+
+        Kodi keeps a finished item in the playlist and just moves the position on, so the
+        queue grew for ever and "next" drifted further from the top of a list that no
+        longer meant anything. Removing index 0 once per passed item is index-safe: Kodi
+        shifts the playing position down with it, so the playing item ends up at the top.
+        """
+        if not state:
+            self._played = None
+            return
+        now = (state.get("playlistid"), state.get("position"))
+        before, self._played = self._played, now
+        if (None in now or before is None or before[0] != now[0]
+                or now[1] <= before[1]):
+            return                                  # a start, a rewind, or another list
+        client = self.client
+        for _ in range(min(now[1] - before[1], now[1])):
+            run(lambda: client.playlist_remove(0), lambda _result: None,
+                lambda _error: None)
+        # ponytail: one RPC per passed item, no batching — a queue jump is a handful of
+        # calls at most. A 100-item skip would want a single Playlist.Remove range call.
 
     def _update_now_page(self, state: dict | None):
         for button in self.now_buttons.values():

@@ -326,8 +326,11 @@ def test_cards_fit_the_pane():
             over = [c for c in measured if c["right"] > window.flow.get_width() + 1]
             assert not over, f"{len(over)} cards outside the grid at {width}: {over[:2]}"
             wanted = window._card_metrics()[1]
-            assert measured[0]["art_width"] == wanted, (
-                f"art {measured[0]['art_width']} != requested {wanted} at {width}")
+            # A card may be wider than its poster (homogeneous shares a line out); the art
+            # now fills that width rather than sitting centred in it, so the check is a
+            # floor, not an equality.
+            assert measured[0]["art_width"] >= wanted, (
+                f"art {measured[0]['art_width']} < requested {wanted} at {width}")
             assert window.get_width() >= width, (
                 f"the window shrank to {window.get_width()} when asked for {width}")
             app.close()
@@ -384,8 +387,8 @@ def test_view_changes_keep_the_layout():
             over = [c for c in measured if c["right"] > window.flow.get_width() + 1]
             assert not over, f"{mode}: {len(over)} cards off the right edge"
             wanted = window._card_metrics()[1]
-            assert all(c["art_width"] == wanted for c in measured), (
-                f"{mode}: artwork stretched to {measured[0]['art_width']} (wanted {wanted})")
+            assert all(c["art_width"] >= wanted for c in measured), (
+                f"{mode}: artwork shrank to {measured[0]['art_width']} (wanted {wanted})")
         assert window.get_width() == window_width, (
             f"the window grew from {window_width} to {window.get_width()} while cycling views")
     finally:
@@ -2475,6 +2478,100 @@ def test_the_hero_view_is_one_billboard_per_entry():
         window._select_index(1)
         pump(0.2)
         assert window._selected_index() == 1, "the billboard is not the list's selection"
+    finally:
+        app.close()
+
+
+def test_a_played_item_leaves_the_queue():
+    """Kodi keeps a finished item in the playlist and moves the position on; the app has
+    to drop it, or the queue fills with things already watched."""
+    app = App()
+    try:
+        window = app.open(1100)
+        client = attach(window)
+        client.playlist[:] = ["a.mkv", "b.mkv", "c.mkv"]
+
+        window._state(dict(LIVE_STATE, position=0, playlistid=1))
+        pump(0.4)
+        assert not [c for c in client.playlist_calls if c[0] == "remove"], \
+            "the queue was pruned on a start, not on an advance"
+
+        window._state(dict(LIVE_STATE, position=1, playlistid=1))
+        pump(0.4)
+        assert ("remove", 0) in client.playlist_calls
+        assert client.playlist == ["b.mkv", "c.mkv"], client.playlist
+
+        # The poll repeats the same position every second; that must not prune twice.
+        client.playlist_calls.clear()
+        window._state(dict(LIVE_STATE, position=1, playlistid=1))
+        pump(0.4)
+        assert not [c for c in client.playlist_calls if c[0] == "remove"]
+        assert client.playlist == ["b.mkv", "c.mkv"]
+    finally:
+        app.close()
+
+
+def test_a_jump_prunes_every_passed_item():
+    app = App()
+    try:
+        window = app.open(1100)
+        client = attach(window)
+        client.playlist[:] = ["a.mkv", "b.mkv", "c.mkv", "d.mkv"]
+
+        window._state(dict(LIVE_STATE, position=0, playlistid=1))
+        pump(0.3)
+        window._state(dict(LIVE_STATE, position=3, playlistid=1))
+        pump(0.6)
+
+        removes = [c for c in client.playlist_calls if c[0] == "remove"]
+        assert len(removes) == 3, removes
+        assert client.playlist == ["d.mkv"], client.playlist
+    finally:
+        app.close()
+
+
+def test_a_new_playlist_does_not_prune():
+    """Position 0 in another playlist is a start, and a rewind is not an advance."""
+    app = App()
+    try:
+        window = app.open(1100)
+        client = attach(window)
+        client.playlist[:] = ["a.mkv", "b.mkv", "c.mkv"]
+
+        window._state(dict(LIVE_STATE, position=2, playlistid=1))
+        pump(0.3)
+        window._state(dict(LIVE_STATE, position=0, playlistid=2))     # another list
+        pump(0.3)
+        window._state(dict(LIVE_STATE, position=0, playlistid=3))     # and another
+        pump(0.3)
+
+        assert not [c for c in client.playlist_calls if c[0] == "remove"], client.playlist_calls
+        assert client.playlist == ["a.mkv", "b.mkv", "c.mkv"]
+    finally:
+        app.close()
+
+
+def test_the_card_frame_stays_thin():
+    """A wall of cards should be a wall of art: the frame spends 3 px a side, no more."""
+    app = App()
+    try:
+        window = app.open(1200)
+        attach(window)
+        window._render()
+        assert pump_until(lambda: pictures(window.flow) > 0), "no artwork rendered"
+        pump(0.4)
+
+        cell = window.flow.get_first_child()
+        card = cell.get_child()                                 # the .tile-card box
+        art = card.get_first_child().get_first_child().get_child()   # box -> overlay -> art
+        # The art fills the card: the flow cell is usually wider than the poster, and a
+        # centred fixed-width art box turned that surplus into a fat frame on both sides.
+        assert card.get_width() - art.get_width() <= 1, (
+            f"the card frame is {card.get_width() - art.get_width()} px wide "
+            f"({card.get_width()} vs {art.get_width()})")
+        assert cell.get_width() - art.get_width() <= 12, (
+            f"the cell gutter is {cell.get_width() - art.get_width()} px")
+        assert window.flow.get_row_spacing() <= 8 and window.flow.get_column_spacing() <= 8
     finally:
         app.close()
 
