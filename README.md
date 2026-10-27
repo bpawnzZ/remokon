@@ -1,6 +1,6 @@
 <div align="center">
 
-# Remokon
+# Remokon — Kodi Remote
 
 **Kodi, from the keyboard.**
 
@@ -34,17 +34,22 @@ Named after リモコン (*rimokon*), the Japanese word for a remote control.
 | [![Add-on browser with sidebar](docs/screenshot-addons.png)](docs/screenshot-addons.png) | [![Remote page](docs/screenshot-remote.png)](docs/screenshot-remote.png) |
 | Sidebar of installed add-ons, favourites on top, poster grid with a live selection. | D-pad, transport, volume — one line reminding you what every key does. |
 
+The grid has five faces — posters, compact, wide thumbs, full-width billboards and a dense
+list — cycled with `v`, and the artwork fills the card in all of them.
+
 ## Features
 
 - **Browse every video add-on** on the box as a folder tree — artwork, breadcrumbs,
-  filtering, and four view modes (posters, compact, wide, list).
+  filtering, and five view modes (posters, compact, wide thumbs, billboards, list). The
+  artwork fills its card in every one of them.
 - **Favourites** for the places you keep going back to, right in the sidebar.
 - **A real remote** — d-pad, back/home/info/menu, fullscreen, volume, mute, steps.
 - **A player you can drive.** A Now playing page with the artwork, the plot, a bar you can
   drag, ±10 s and ±60 s, previous/next in the queue, volume and mute — and every key the
   remote has works there too.
 - **A queue.** Send anything to *play next* from the item menu, then work the list in a
-  panel on the right: play an item now, move it, drop it, clear it.
+  panel on the right: play an item now, move it, drop it, clear it. What has played leaves
+  the queue on its own, so the list is always what is still to come.
 - **Three surfaces, one window.** `\` walks browsing → remote → the player → back, and the
   browser returns exactly where you left it: same folder, same selection, same scroll.
 - **Type with your keyboard.** When Kodi opens its on-screen keyboard, Remokon pops a
