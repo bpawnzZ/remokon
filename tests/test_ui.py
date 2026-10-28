@@ -2576,6 +2576,37 @@ def test_the_card_frame_stays_thin():
         app.close()
 
 
+def test_queue_play_now_stops_first():
+    """The queue's play now is a playback start like any other: stop, 1.5 s, open."""
+    app = App()
+    try:
+        window = app.open(1100)
+        client = attach(window)
+        window._show_queue() if hasattr(window, "_show_queue") else None
+        pump(0.3)
+        client.playlist[:] = ["a.mkv", "b.mkv", "c.mkv"]
+        events = []
+        client.stop = lambda playerid: events.append(("stop", playerid))
+        client.playlist_open = lambda position: events.append(("open", position))
+
+        client.playing = True                    # active_players reports playerid 1
+        started = time.monotonic()
+        window._queue_action("play", 2)
+        assert pump_until(lambda: events == [("stop", 1), ("open", 2)], timeout=6), events
+        elapsed = time.monotonic() - started
+        assert elapsed >= ui.REPLACE_PAUSE - 0.1, (
+            f"the row was opened {elapsed:.2f}s after the stop, want >= {ui.REPLACE_PAUSE}")
+
+        events.clear()
+        client.playing = False                   # nothing playing: no stop, no wait
+        started = time.monotonic()
+        window._queue_action("play", 1)
+        assert pump_until(lambda: events == [("open", 1)], timeout=4), events
+        assert time.monotonic() - started < 1.0, "an idle play now waited for nothing"
+    finally:
+        app.close()
+
+
 def main() -> int:
     tests = [value for name, value in sorted(globals().items())
              if name.startswith("test_") and callable(value)]

@@ -1848,30 +1848,42 @@ class Window(Adw.ApplicationWindow):
     def _play(self, entry: Entry):
         self._play_file(entry.file, entry.heading)
 
+    def _replace_playback(self, then):
+        """Stop what is playing, wait, then run `then` — all on the worker.
+
+        A `Player.Open` (or `Playlist.OpenItem`) that lands while the previous film is
+        still stopping fails intermittently, so every path that starts playback goes
+        through here: the grid, the list, favourites, and the queue's play now. Asking the
+        box beats trusting `self.player`, which can be a second stale either way.
+        """
+        def swap():
+            players = self.client.active_players()
+            if players:
+                self.client.stop(players[0]["playerid"])
+                time.sleep(REPLACE_PAUSE)
+            return then()
+        return swap
+
     def _play_file(self, file: str, title: str):
         def ok(_result):
             self.toasts.add_toast(Adw.Toast(title=f"Playing {title}", timeout=3))
             self._tick()
 
         # A Player.Open that lands while the previous film is still stopping fails
-        # intermittently, so a replacement is stop → wait → open. The whole sequence
-        # is on the worker: the pause costs the window nothing, and asking the box
-        # beats trusting `self.player`, which can be a second stale either way.
+        # intermittently, so a replacement is stop → wait → open; `_replace_playback` owns
+        # the pause and keeps it off the GTK thread.
         #
         # It plays THROUGH the box's video playlist rather than opening a bare file:
         # Kodi only advances to the next item when the current one came from the
         # playlist, so a direct `Player.Open {file}` left everything added to the queue
         # as dead weight — the classic "my queue never plays".
         def swap():
-            players = self.client.active_players()
-            if players:
-                self.client.stop(players[0]["playerid"])
-                time.sleep(REPLACE_PAUSE)
             self.client.playlist_clear()
             self.client.playlist_add(file)
             return self.client.playlist_open(0)
 
-        run(swap, ok, lambda error: self.toasts.add_toast(Adw.Toast(title=str(error), timeout=5)))
+        run(self._replace_playback(swap), ok,
+            lambda error: self.toasts.add_toast(Adw.Toast(title=str(error), timeout=5)))
 
     def _play_pause(self):
         if not self.player:
@@ -2430,7 +2442,10 @@ class Window(Adw.ApplicationWindow):
         elif action == "remove":
             call = lambda: client.playlist_remove(position)
         elif action == "play":
-            call = lambda: client.playlist_open(position)
+            # Stop first, like every other playback start: opening on top of a film that
+            # is still stopping is the intermittent failure this app already fixed
+            # everywhere else.
+            call = self._replace_playback(lambda: client.playlist_open(position))
         else:
             return
         # Where the caret should land once the list is re-read: a moved item follows
