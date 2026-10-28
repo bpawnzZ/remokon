@@ -380,9 +380,9 @@ class Window(Adw.ApplicationWindow):
 
         self._gen = 0          # bumps on every render; stale image arrivals are dropped
         self._polling = False
-        # The last (playlistid, position) the poll saw, so an advance inside one playlist
-        # can be told from a fresh one and the played item dropped from the queue.
-        self._played: tuple | None = None
+        # The last (playlistid, position) the queue prune acted on: one attribute, so a
+        # 1 Hz poll cannot fire the same removals twice.
+        self._pruned: tuple | None = None
         # A drag owns the seek handle until it commits: `_seek_target` is the pending
         # position and `_seek_timer` the one-shot that sends it. The volume slider
         # works the same way through `_volume_timer`.
@@ -2246,25 +2246,31 @@ class Window(Adw.ApplicationWindow):
     def _prune_played(self, state: dict | None):
         """Drop what has already played from the queue.
 
-        Kodi keeps a finished item in the playlist and just moves the position on, so the
-        queue grew for ever and "next" drifted further from the top of a list that no
-        longer meant anything. Removing index 0 once per passed item is index-safe: Kodi
-        shifts the playing position down with it, so the playing item ends up at the top.
+        Kodi keeps a finished item in the playlist and only moves the position on, so the
+        queue grew for ever. This does not track transitions — the box drops its player
+        between items, and a remembered delta then misses the advance, which is exactly how
+        the first attempt silently stopped working. Instead it removes every entry BEFORE
+        the one playing; that needs no memory, survives a gap, a jump or a restart of the
+        app, and is idempotent: once pruned the playing item is at index 0 and nothing
+        fires again.
         """
-        if not state:
-            self._played = None
+        if not state or self.client is None:
             return
-        now = (state.get("playlistid"), state.get("position"))
-        before, self._played = self._played, now
-        if (None in now or before is None or before[0] != now[0]
-                or now[1] <= before[1]):
-            return                                  # a start, a rewind, or another list
+        position = state.get("position")
+        if not position:
+            return                                   # nothing before the playing item
+        key = (state.get("playlistid"), position)
+        if key == self._pruned:
+            return                                   # already acted on this position
+        self._pruned = key
         client = self.client
-        for _ in range(min(now[1] - before[1], now[1])):
+        for _ in range(int(position)):
             run(lambda: client.playlist_remove(0), lambda _result: None,
                 lambda _error: None)
         # ponytail: one RPC per passed item, no batching — a queue jump is a handful of
         # calls at most. A 100-item skip would want a single Playlist.Remove range call.
+        # A failed remove is not retried: the position does not move, so the key matches
+        # on the next tick and the queue keeps that entry rather than thrashing.
 
     def _update_now_page(self, state: dict | None):
         for button in self.now_buttons.values():

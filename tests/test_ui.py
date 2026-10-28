@@ -2530,19 +2530,19 @@ def test_a_jump_prunes_every_passed_item():
         app.close()
 
 
-def test_a_new_playlist_does_not_prune():
-    """Position 0 in another playlist is a start, and a rewind is not an advance."""
+def test_a_start_at_the_top_does_not_prune():
+    """Position 0 means nothing has been passed: no removals, and repeats stay inert."""
     app = App()
     try:
         window = app.open(1100)
         client = attach(window)
         client.playlist[:] = ["a.mkv", "b.mkv", "c.mkv"]
 
-        window._state(dict(LIVE_STATE, position=2, playlistid=1))
-        pump(0.3)
-        window._state(dict(LIVE_STATE, position=0, playlistid=2))     # another list
-        pump(0.3)
-        window._state(dict(LIVE_STATE, position=0, playlistid=3))     # and another
+        for playlistid in (1, 2, 3):
+            window._state(dict(LIVE_STATE, position=0, playlistid=playlistid))
+            pump(0.3)
+        # An idle box between items is not a reason to forget anything either.
+        window._state(None)
         pump(0.3)
 
         assert not [c for c in client.playlist_calls if c[0] == "remove"], client.playlist_calls
@@ -2603,6 +2603,27 @@ def test_queue_play_now_stops_first():
         window._queue_action("play", 1)
         assert pump_until(lambda: events == [("open", 1)], timeout=4), events
         assert time.monotonic() - started < 1.0, "an idle play now waited for nothing"
+    finally:
+        app.close()
+
+
+def test_the_queue_still_prunes_across_an_idle_gap():
+    """The box drops its player for a beat between items; that gap must not erase the
+    position, or nothing is ever pruned."""
+    app = App()
+    try:
+        window = app.open(1100)
+        client = attach(window)
+        client.playlist[:] = ["a.mkv", "b.mkv", "c.mkv"]
+
+        window._state(dict(LIVE_STATE, position=0, playlistid=1))
+        pump(0.3)
+        window._state(None)                       # the end-of-item gap
+        pump(0.3)
+        window._state(dict(LIVE_STATE, position=1, playlistid=1))
+        pump(0.6)
+        assert ("remove", 0) in client.playlist_calls, client.playlist_calls
+        assert client.playlist == ["b.mkv", "c.mkv"], client.playlist
     finally:
         app.close()
 
