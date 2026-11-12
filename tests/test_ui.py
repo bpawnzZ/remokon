@@ -2628,6 +2628,104 @@ def test_the_queue_still_prunes_across_an_idle_gap():
         app.close()
 
 
+def test_the_bar_shows_the_playing_artwork():
+    """The bottom bar's thumbnail is the playing item, from the same snapshot as its
+    title — and a placeholder when the box has none."""
+    app = App()
+    was_playback_state = kodi.playback_state
+    try:
+        window = app.open(1100)
+        client = attach(window)
+        window._render()
+        pump(0.3)
+
+        # Nothing playing: no artwork in the thumbnail, the glyph instead.
+        assert pictures(window.np_thumb) == 0, "the bar has art with nothing playing"
+
+        state = dict(LIVE_STATE, art="image://%2fmedia%2fblade.jpg/")
+        # The 1 Hz tick would otherwise answer "nothing playing" (the fake has no
+        # player) and clear the bar between the paint and the assertion.
+        kodi.playback_state = lambda client: dict(state)
+        window._state(state)
+        assert pump_until(lambda: pictures(window.np_thumb) > 0), \
+            f"no thumbnail: {client.image_calls}"
+        assert window.np_title.get_label() == "Blade Runner"
+
+        # Geometry from the widget tree, not a screenshot: a small thumbnail, at the
+        # bar's left edge, before the title.
+        pump(0.3)
+        width, height = window.np_thumb.get_width(), window.np_thumb.get_height()
+        assert height == ui.BAR_ART_SIZE[1] and 90 <= width <= 100, (width, height)
+        assert window.now_playing_bar.get_height() < 80, window.now_playing_bar.get_height()
+        _ok, thumb = window.np_thumb.compute_point(window.now_playing_bar,
+                                                   Graphene.Point().init(0, 0))
+        _ok, title = window.np_title.compute_point(window.now_playing_bar,
+                                                   Graphene.Point().init(0, 0))
+        assert thumb.x < title.x, (thumb.x, title.x)
+
+        # The player goes away: the thumbnail goes with it.
+        kodi.playback_state = lambda client: None
+        window._state(None)
+        pump(0.2)
+        assert pictures(window.np_thumb) == 0, "the thumbnail outlived the player"
+    finally:
+        kodi.playback_state = was_playback_state
+        app.close()
+
+
+def test_clicking_the_bar_opens_the_player():
+    """The bar is the way into the player: click it and the page is `now`. Its play and
+    stop buttons keep their own meaning."""
+    app = App()
+    try:
+        window = app.open(1100)
+        client = attach(window)
+        window._render()
+        pump(0.3)
+
+        assert window.stack.get_visible_child_name() == "grid"
+        window.np_open.emit("clicked")
+        pump(0.2)
+        assert window.stack.get_visible_child_name() == "now", \
+            window.stack.get_visible_child_name()
+
+        # Back to browse, then the transport buttons: neither changes the page.
+        window._show_grid()
+        pump(0.2)
+        client.stopped.clear()
+        window.np_play.emit("clicked")
+        window.np_stop.emit("clicked")
+        pump(0.2)
+        assert window.stack.get_visible_child_name() == "grid", \
+            "a transport button left the browse surface"
+    finally:
+        app.close()
+
+
+def test_back_leaves_the_player_without_history():
+    """From a fresh browse surface the history is empty, and Back still leaves the
+    player: there it means "leave this page", not "go back in the tree"."""
+    app = App()
+    try:
+        window = app.open(1100)
+        attach(window)
+        window._render()
+        pump(0.3)
+        window.back_stack.clear()
+        window._show_now()
+        pump(0.2)
+        assert window.stack.get_visible_child_name() == "now"
+        assert window.back_button.get_sensitive() is True, \
+            "Back is dead on the player with an empty history"
+
+        window.back_button.emit("clicked")
+        pump(0.2)
+        assert window.stack.get_visible_child_name() == "grid", \
+            f"Back left the player on {window.stack.get_visible_child_name()}"
+    finally:
+        app.close()
+
+
 def main() -> int:
     tests = [value for name, value in sorted(globals().items())
              if name.startswith("test_") and callable(value)]

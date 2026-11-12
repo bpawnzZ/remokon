@@ -53,6 +53,8 @@ ZOOM_SCALE = {0: 0.85, 1: 1.0, 2: 1.3}
 # too: art height drives the row height.
 ROW_ZOOM = {0: (30, 42), 1: (40, 56), 2: (58, 82)}
 NOW_ART_SIZE = (900, 560)
+# The bottom bar's thumbnail: small enough that a 16:9 still cannot size the bar.
+BAR_ART_SIZE = (96, 54)
 # `\` walks the three surfaces in this order and wraps: one key, three places to be.
 # Pages absent from the map (settings, notice, loading) make the key inert there.
 PAGE_CYCLE = {"grid": "remote", "remote": "now", "now": "grid"}
@@ -127,6 +129,11 @@ flowboxchild:focus { outline: 3px solid @accent_bg_color; outline-offset: -2px; 
 .np-scale highlight { border-radius: 99px; }
 .np-time { opacity: 0.8; font-feature-settings: "tnum"; }
 .now-playing { border-top: 1px solid alpha(currentColor, 0.10); }
+/* The bar is a button, not a strip of labels: no padding of its own, so it reads as the
+   same row it was, and the thumbnail gets the corners. */
+.nowbar-open { padding: 0; border-radius: 10px; }
+.nowbar-open:hover { background-color: alpha(@accent_bg_color, 0.14); }
+.np-thumb { border-radius: 6px; background-color: alpha(currentColor, 0.10); }
 
 /* The queue: what comes next, docked on the right. */
 .queue-head { font-weight: 700; }
@@ -333,6 +340,7 @@ HELP = (
     )),
     ("Mouse", (
         ("click", "open a folder, or play an item"),
+        ("click the bar", "what is playing \u2014 open the player"),
         ("right-click", "item menu: play, add to queue, \u2605 Favourites"),
         ("wheel", "scroll the grid, a list, or seek on the player's bar"),
     )),
@@ -518,11 +526,9 @@ class Window(Adw.ApplicationWindow):
         self.stack.add_named(self._build_remote_page(), "remote")
         self.stack.add_named(self._build_loading_page(), "loading")
         # One rule for every way a page changes (`\`, the gear, a back stack, a key):
-        # the bar exists for the surfaces that have no player of their own.
-        self.stack.connect(
-            "notify::visible-child-name",
-            lambda *_a: self.now_playing_bar.set_visible(
-                self.stack.get_visible_child_name() != "now"))
+        # the bar exists for the surfaces that have no player of their own, and Back
+        # means "leave this page" on the player and the Remote.
+        self.stack.connect("notify::visible-child-name", self._page_changed)
 
         # The sidebar and its divider hide together: hiding only the scroller leaves a
         # 1 px separator against the window edge, and the freed width is the point.
@@ -972,13 +978,38 @@ class Window(Adw.ApplicationWindow):
         return button
 
     def _build_now_playing(self) -> Gtk.Widget:
-        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12,
+        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
                       margin_top=8, margin_bottom=8, margin_start=12, margin_end=12,
                       css_classes=["now-playing"])
+        # The bar's thumbnail: an AspectFrame, the same idiom as the player's artwork —
+        # it holds the size and the Picture inside fills it. A Box does not: it hands a
+        # non-expanding child its natural size, and an expanding one inflated the bar.
+        self.np_thumb = Gtk.AspectFrame(ratio=BAR_ART_SIZE[0] / BAR_ART_SIZE[1],
+                                        obey_child=False,
+                                        width_request=BAR_ART_SIZE[0],
+                                        valign=Gtk.Align.CENTER,
+                                        css_classes=["np-thumb"])
+        # An AspectFrame expands by default; in a bar it must not, or it takes the row.
+        self.np_thumb.set_hexpand(False)
+        self.np_thumb.set_vexpand(False)
+        self._bar_art = None
         self.np_title = Gtk.Label(label="Nothing playing", xalign=0.0, hexpand=True,
                                   ellipsize=3, css_classes=["tile-title"])
         self.np_progress = Gtk.ProgressBar(width_request=240, valign=Gtk.Align.CENTER)
         self.np_time = Gtk.Label(label="", width_chars=15, css_classes=["dim-label"])
+
+        # The bar is the way into the player, so everything but the two transport
+        # buttons lives in one flat button. Nesting them keeps play and stop their own
+        # targets; a gesture on the bar would have to dodge them by hand.
+        self.np_open = Gtk.Button(css_classes=["flat", "nowbar-open"], hexpand=True,
+                                  valign=Gtk.Align.CENTER,
+                                  tooltip_text="Now playing \u2014 open the player")
+        self.np_open.connect("clicked", lambda *_: self._show_now())
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        for widget in (self.np_thumb, self.np_title, self.np_progress, self.np_time):
+            row.append(widget)
+        self.np_open.set_child(row)
+
         self.np_play = Gtk.Button(icon_name="media-playback-start-symbolic",
                                   tooltip_text="Play / pause (Space)")
         self.np_play.connect("clicked", lambda *_: self._play_pause())
@@ -987,12 +1018,27 @@ class Window(Adw.ApplicationWindow):
         self.np_stop.connect("clicked", lambda *_: self._stop())
         self.np_stop.set_sensitive(False)
 
-        bar.append(self.np_title)
-        bar.append(self.np_progress)
-        bar.append(self.np_time)
+        bar.append(self.np_open)
         bar.append(self.np_play)
         bar.append(self.np_stop)
+        self._set_bar_art("")
         return bar
+
+    def _set_bar_art(self, url: str):
+        """The bar's thumbnail: the playing item's artwork, or the glyph for none.
+
+        It reads the same snapshot as the rest of the bar, so it can never show one
+        item's art beside another item's title.
+        """
+        if url == self._bar_art:
+            return
+        self._bar_art = url
+        if url:
+            self._apply_texture(self.np_thumb, url, None, BAR_ART_SIZE)
+        else:
+            self.np_thumb.set_child(Gtk.Image(icon_name="media-optical-symbolic",
+                                              pixel_size=16,
+                                              css_classes=["placeholder-icon"]))
 
     # -- connection --------------------------------------------------------
 
@@ -1779,8 +1825,17 @@ class Window(Adw.ApplicationWindow):
     def _update_nav_buttons(self):
         if getattr(self, "back_button", None) is None:
             return
-        self.back_button.set_sensitive(bool(self.back_stack))
+        # On the player and the Remote, Back means "leave this page" and needs no
+        # history; on the browse surface the history is the only way back.
+        leaves_page = self.stack.get_visible_child_name() in ("now", "remote")
+        self.back_button.set_sensitive(leaves_page or bool(self.back_stack))
         self.forward_button.set_sensitive(bool(self.forward_stack))
+
+    def _page_changed(self, *_args):
+        """One handler for every way the page changes: the bar's visibility and the
+        Back button's sensitivity both follow the page, not the transition."""
+        self.now_playing_bar.set_visible(self.stack.get_visible_child_name() != "now")
+        self._update_nav_buttons()
 
     def _restore(self, place: dict):
         """Put a recorded place back on screen, selection and scroll included."""
@@ -1964,6 +2019,8 @@ class Window(Adw.ApplicationWindow):
             self.np_play.set_icon_name("media-playback-start-symbolic")
             self.np_play.set_sensitive(False)
             self.np_stop.set_sensitive(False)
+        # Same snapshot the title just came from, so the thumbnail cannot lag the text.
+        self._set_bar_art(kodi.artwork_url((state or {}).get("art") or "", self.host) or "")
 
     # -- the remote --------------------------------------------------------
 
